@@ -1,0 +1,23 @@
+[package]
+name = "dspm-collector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# HTTP 업로드
+reqwest = { version = "0.11", features = ["json", "gzip", "rustls-tls"] }
+
+# AWS SDK (S3/RDS/ECR + 리전 조회용 EC2)
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-types = "1"
+aws-sdk-s3 = "1"
+aws-sdk-rds = "1"
+aws-sdk-ecr = "1"
+
+[features]
+# EC2 인스턴스 ‘자산’ 수집을 켜고 끄는 스위치 (리전 조회는 항상 필요)
+ec2 = []
