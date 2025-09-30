@@ -1,0 +1,36 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: dspm
+      POSTGRES_USER: dspm
+      POSTGRES_PASSWORD: dspm
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dspm -d dspm"]
+      interval: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["miniodata:/data"]
+
+  analyzer:
+    build: ./dspm-analyzer
+    environment:
+      PG_DSN: postgresql://dspm:dspm@postgres:5432/dspm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["8000:8000"]
+
+volumes:
+  pgdata:
+  miniodata:
