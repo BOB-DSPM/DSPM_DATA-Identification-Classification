@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/dspm
+    username: dspm
+    password: dspm
+    driver-class-name: org.postgresql.Driver   
+    hibernate:
+      ddl-auto: update  
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          time_zone: UTC
+        format_sql: true
+    show-sql: true        
+  open-in-view: false
+
+server:
+  port: 8080

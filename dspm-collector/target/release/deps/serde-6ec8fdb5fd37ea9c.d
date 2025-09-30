@@ -1,0 +1,14 @@
+/home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/deps/serde-6ec8fdb5fd37ea9c.d: /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/build/serde-cfe125327cacaf16/out/private.rs
+
+/home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/deps/libserde-6ec8fdb5fd37ea9c.rlib: /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/build/serde-cfe125327cacaf16/out/private.rs
+
+/home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/deps/libserde-6ec8fdb5fd37ea9c.rmeta: /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/build/serde-cfe125327cacaf16/out/private.rs
+
+/home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/dspm/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/build/serde-cfe125327cacaf16/out/private.rs:
+
+# env-dep:OUT_DIR=/home/dspm/DSPM_DATA-Identification-Classification/dspm-collector/target/release/build/serde-cfe125327cacaf16/out
