@@ -1,43 +1,38 @@
-use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AssetKind {
-    ObjectStore, FileStore, BlockStore,
-    Database, DataWarehouse, NoSQL, GraphDB, TimeSeries, Ledger,
-    LogStore, Stream, Queue, Topic, EventBus, Search,
-    MLArtifact, ETL, Backup, Secrets, Params, Registry, Docs, Other,
-}
+use async_trait::async_trait;
+use anyhow::Result;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+// 표준 Asset 모델: camelCase 직렬화/역직렬화
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Asset {
-    pub id: String,                 // 글로벌 유니크 키(arn or composed)
-    pub service: String,            // "s3", "rds", ...
+    pub id: String,
+    pub service: String,
     pub kind: AssetKind,
     pub region: String,
     pub name: Option<String>,
-    pub uri: Option<String>,        // s3://bucket/prefix, opensearch endpoint, rds arn 등
-    pub size_bytes: Option<u64>,    // 가능할 때
+    pub uri: Option<String>,
+    pub size_bytes: Option<i64>,
     pub encrypted: Option<bool>,
     pub kms_key_id: Option<String>,
     pub tags: HashMap<String, String>,
-    pub metadata: HashMap<String, serde_json::Value>, // 서비스 고유 메타
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AssetKind {
+    ObjectStore,
+    Database,
+    Log,
+    Queue,
+    ComputeVolume,
+}
+
+// Collector 인터페이스
 #[async_trait]
 pub trait Collector: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn discover(&self, regions: &[String]) -> anyhow::Result<Vec<Asset>>;
-}
-
-// simple registry
-use once_cell::sync::Lazy;
-use std::sync::RwLock;
-
-static REGISTRY: Lazy<RwLock<Vec<Box<dyn Collector>>>> = Lazy::new(|| RwLock::new(vec![]));
-
-pub fn register(c: Box<dyn Collector>) { REGISTRY.write().unwrap().push(c); }
-pub fn get_all() -> Vec<Box<dyn Collector>> {
-    REGISTRY.read().unwrap().iter().map(|c| c.as_ref()).cloned().collect()
+    async fn discover(&self, regions: &[String], mock: bool) -> Result<Vec<Asset>>;
 }

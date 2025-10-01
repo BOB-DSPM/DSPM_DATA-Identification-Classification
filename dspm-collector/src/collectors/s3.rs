@@ -1,85 +1,124 @@
 use crate::collector_core::*;
-use aws_sdk_s3 as s3;
-use aws_types::region::Region;
+use anyhow::Result;
 use async_trait::async_trait;
+use aws_config::BehaviorVersion;
+use aws_sdk_s3 as s3;
+use serde_json::json;
 use std::collections::HashMap;
 
 pub struct S3Collector;
+
+impl S3Collector {
+    pub fn new() -> Self { Self }
+}
 
 #[async_trait]
 impl Collector for S3Collector {
     fn name(&self) -> &'static str { "s3" }
 
-    async fn discover(&self, regions: &[String]) -> anyhow::Result<Vec<Asset>> {
-        // MOCK_MODE
-        if std::env::var("MOCK_MODE").is_ok() {
-            let data = tokio::fs::read_to_string("mocks/s3_list_buckets.json").await?;
-            let parsed: serde_json::Value = serde_json::from_str(&data)?;
-
-            let mut out_assets = vec![];
-            if let Some(arr) = parsed["Buckets"].as_array() {
-                for b in arr {
-                    let name = b["Name"].as_str().unwrap();
-                    out_assets.push(Asset {
-                        id: format!("arn:aws:s3:::{}", name),
-                        service: "s3".into(),
-                        kind: AssetKind::ObjectStore,
-                        region: "ap-northeast-2".into(), // mock 데이터는 리전 고정
-                        name: Some(name.to_string()),
-                        uri: Some(format!("s3://{}/", name)),
-                        size_bytes: None,
-                        encrypted: Some(true),
-                        kms_key_id: None,
-                        tags: HashMap::new(),
-                        metadata: maplit::hashmap! {
-                            "mock".into() => serde_json::json!(true)
-                        },
-                    });
-                }
-            }
-            return Ok(out_assets);
+    async fn discover(&self, regions: &[String], mock: bool) -> Result<Vec<Asset>> {
+        // Mock 모드: 빠른 로컬 테스트 용
+        if mock {
+            let mut md = HashMap::new();
+            md.insert("public_blocked".into(), json!(true));
+            return Ok(vec![Asset {
+                id: "arn:aws:s3:::sample-bucket-mock".into(),
+                service: "s3".into(),
+                kind: AssetKind::ObjectStore,
+                region: regions.get(0).cloned().unwrap_or_else(|| "ap-northeast-2".into()),
+                name: Some("sample-bucket-mock".into()),
+                uri: Some("s3://sample-bucket-mock/".into()),
+                size_bytes: None,
+                encrypted: Some(true),
+                kms_key_id: None,
+                tags: HashMap::from([("env".into(), "dev".into())]),
+                metadata: md,
+            }]);
         }
 
-        // 실제 AWS SDK 호출 (기존 코드)
-        let conf = aws_config::load_from_env().await;
+        // 실제 호출
+        let conf = aws_config::load_defaults(BehaviorVersion::latest()).await;
         let client = s3::Client::new(&conf);
-        let mut out_assets = vec![];
 
-        let buckets = client.list_buckets().send().await?.buckets().unwrap_or_default().to_vec();
-        for b in buckets {
-            let name = b.name().unwrap().to_string();
-            // 위치(리전)
-            let loc = client.get_bucket_location().bucket(&name).send().await?;
-            let region = loc.location_constraint().map(|v| v.as_str().to_string()).unwrap_or_else(|| "us-east-1".into());
+        let resp = client.list_buckets().send().await?;
+        // 당신 SDK에선 &[Bucket] (Option 아님) 이므로 그대로 사용
+        let buckets = resp.buckets();
 
-            // 암호화
-            let enc = client.get_bucket_encryption().bucket(&name).send().await.ok();
-            let encrypted = enc.as_ref().and_then(|e| e.server_side_encryption_configuration()).is_some();
+        let mut out: Vec<Asset> = Vec::new();
 
-            // 퍼블릭 액세스 차단
-            let pab = client.get_public_access_block().bucket(&name).send().await.ok();
-            let is_public_blocked = pab.as_ref()
-                .and_then(|v| v.public_access_block_configuration())
-                .map(|c| c.block_public_acls().unwrap_or(true) && c.block_public_policy().unwrap_or(true))
-                .unwrap_or(false);
+        for b in buckets.iter() {
+            let Some(name) = b.name() else { continue; };
+            let name = name.to_string();
 
-            let mut meta = HashMap::new();
-            meta.insert("public_blocked".into(), serde_json::json!(is_public_blocked));
+            // 리전 조회
+            let region = match client.get_bucket_location().bucket(&name).send().await {
+                Ok(loc) => {
+                    loc.location_constraint()
+                        .map(|v| v.as_str().to_string())
+                        .unwrap_or_else(|| "us-east-1".to_string())
+                }
+                Err(_) => "unknown".to_string(),
+            };
 
-            out_assets.push(Asset {
+            // 리전 필터(옵션)
+            if !regions.is_empty() && !regions.contains(&region) {
+                continue;
+            }
+
+            // 암호화/KMS
+            let (encrypted, kms_key_id) = match client.get_bucket_encryption().bucket(&name).send().await {
+                Ok(enc) => {
+                    if let Some(cfg) = enc.server_side_encryption_configuration() {
+                        let rules = cfg.rules(); // &[ServerSideEncryptionRule]
+                        let mut kms: Option<String> = None;
+                        for r in rules {
+                            if let Some(app) = r.apply_server_side_encryption_by_default() {
+                                if let Some(k) = app.kms_master_key_id() {
+                                    kms = Some(k.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                        (Some(!rules.is_empty()), kms)
+                    } else {
+                        (Some(false), None)
+                    }
+                }
+                Err(_) => (None, None),
+            };
+
+            // 퍼블릭 접근 차단
+            let public_blocked = match client.get_public_access_block().bucket(&name).send().await {
+                Ok(pab) => {
+                    if let Some(cfg) = pab.public_access_block_configuration() {
+                        let acls = cfg.block_public_acls().unwrap_or(true);
+                        let pol  = cfg.block_public_policy().unwrap_or(true);
+                        Some(acls && pol)
+                    } else { None }
+                }
+                Err(_) => None,
+            };
+
+            let mut metadata = HashMap::new();
+            if let Some(pb) = public_blocked {
+                metadata.insert("public_blocked".into(), json!(pb));
+            }
+
+            out.push(Asset {
                 id: format!("arn:aws:s3:::{}", name),
                 service: "s3".into(),
                 kind: AssetKind::ObjectStore,
-                region,
+                region: region.clone(),
                 name: Some(name.clone()),
                 uri: Some(format!("s3://{name}/")),
                 size_bytes: None,
-                encrypted: Some(encrypted),
-                kms_key_id: None,
+                encrypted,
+                kms_key_id,
                 tags: HashMap::new(),
-                metadata: meta,
+                metadata,
             });
         }
-        Ok(out_assets)
+
+        Ok(out)
     }
 }

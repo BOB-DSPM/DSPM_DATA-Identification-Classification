@@ -5,19 +5,19 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# HTTP 업로드
-reqwest = { version = "0.11", features = ["json", "gzip", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
 
-# AWS SDK (S3/RDS/ECR + 리전 조회용 EC2)
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-types = "1"
+aws-config = "1"
 aws-sdk-s3 = "1"
-aws-sdk-rds = "1"
-aws-sdk-ecr = "1"
+aws-types = "1"
 
-[features]
-# EC2 인스턴스 ‘자산’ 수집을 켜고 끄는 스위치 (리전 조회는 항상 필요)
-ec2 = []
+# 필요 시 로그
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
