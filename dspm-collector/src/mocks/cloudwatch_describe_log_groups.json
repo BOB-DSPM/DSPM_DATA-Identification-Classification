@@ -1,0 +1,10 @@
+{
+  "logGroups": [
+    {
+      "arn": "arn:aws:logs:ap-northeast-2:111111111111:log-group:/aws/dspm/app",
+      "logGroupName": "/aws/dspm/app",
+      "kmsKeyId": "arn:aws:kms:ap-northeast-2:111:key/cwl-key",
+      "retentionInDays": 30
+    }
+  ]
+}

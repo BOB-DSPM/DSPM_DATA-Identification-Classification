@@ -1,61 +1,49 @@
-mod types;
-mod http;
-mod utils;
-mod s3;
-mod rds;
-mod ecr;
-#[cfg(feature = "ec2")] mod ec2;
-mod mock;
+mod collector_core;
+mod collectors; // re-export all collectors and call register_all()
 
-use anyhow::Result;
-use types::{Asset, BulkPayload};
-use utils::{chunked, list_enabled_regions, env_or};
-use http::post_bulk;
-use aws_config::BehaviorVersion;
-
-const DEFAULT_ENDPOINT: &str = "http://localhost:8000/api/assets:bulk";
-const DEFAULT_BULK: usize = 1000;
+use collector_core::{get_all};
+use tokio::task;
+use reqwest::Client;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // ---- 설정 ----
-    let endpoint = env_or("API_ENDPOINT", DEFAULT_ENDPOINT); 
-    let source_id = env_or("SOURCE_ID", "default");
-    let bulk_size: usize = env_or("ASSETS_BULK_SIZE", &DEFAULT_BULK.to_string())
-        .parse().unwrap_or(DEFAULT_BULK);
-    let use_mock = env_or("USE_MOCK", "false").to_lowercase() == "true";
+async fn main() -> anyhow::Result<()> {
+    let regions = aws_regions().await?;
+    collectors::register_all(); // 각 모듈에서 collector_core::register 호출
 
-    // ---- 수집 ----
-    let mut assets: Vec<Asset>;
-
-    if use_mock {
-        // 모의 데이터만 업로드 (AWS 자격증명 불필요)
-        assets = mock::discover_mock().await;
-    } else {
-        // 실제 AWS SDK 경로
-        let cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
-
-        // S3(글로벌)
-        assets = s3::discover_buckets(&cfg).await.unwrap_or_default();
-
-        // 리전 목록
-        let regions = list_enabled_regions(&cfg).await.unwrap_or_default();
-
-        // RDS/ECR/EC2(옵션) per region
-        for r in &regions {
-            if let Ok(mut v) = rds::discover_rds(&cfg, r).await { assets.append(&mut v); }
-            if let Ok(mut v) = ecr::discover_ecr(&cfg, r).await { assets.append(&mut v); }
-            #[cfg(feature = "ec2")]
-            if let Ok(mut v) = ec2::discover_ec2(&cfg, r).await { assets.append(&mut v); }
+    let client = Client::new();
+    let mut all_assets = vec![];
+    let tasks = get_all().into_iter().map(|c| {
+        let regions = regions.clone();
+        async move {
+            match c.discover(&regions).await {
+                Ok(mut v) => { println!("{} -> {} assets", c.name(), v.len()); Ok(v) }
+                Err(e) => { eprintln!("{} failed: {e}", c.name()); Ok(vec![]) }
+            }
         }
+    });
+    for res in futures::future::join_all(tasks).await {
+        if let Ok(mut v) = res { all_assets.append(&mut v); }
     }
 
-    // ---- 청크 업로드 ----
-    for batch in chunked(&assets, bulk_size) {
-        let payload = BulkPayload { source_id: source_id.clone(), items: batch };
-        post_bulk(&endpoint, &payload).await?;
-    }
+    // bulk post to analyzer
+    client.post("http://localhost:8080/api/assets:bulk")
+        .json(&all_assets)
+        .send().await?
+        .error_for_status()?;
 
-    println!("uploaded {} assets to {}", assets.len(), endpoint);
     Ok(())
+}
+
+async fn aws_regions() -> anyhow::Result<Vec<String>> {
+    use aws_config::meta::region::RegionProviderChain;
+    use aws_sdk_ec2 as ec2;
+
+    let conf = aws_config::load_from_env().await;
+    let ec2c = ec2::Client::new(&conf);
+    let out = ec2c.describe_regions().send().await?;
+    let mut regions = vec![];
+    for r in out.regions().unwrap_or_default() {
+        if let Some(name) = r.region_name() { regions.push(name.to_string()); }
+    }
+    Ok(regions)
 }

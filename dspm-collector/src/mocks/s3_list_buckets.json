@@ -1,0 +1,6 @@
+{
+  "Buckets": [
+    { "Name": "dspm-sample-bucket", "CreationDate": "2024-01-01T00:00:00Z" },
+    { "Name": "dspm-archive", "CreationDate": "2024-03-15T00:00:00Z" }
+  ]
+}

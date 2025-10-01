@@ -1,0 +1,16 @@
+{
+  "DBInstances": [
+    {
+      "DBInstanceIdentifier": "dspm-postgres",
+      "DBInstanceArn": "arn:aws:rds:ap-northeast-2:111:db:dspm-postgres",
+      "Engine": "postgres",
+      "EngineVersion": "15.3",
+      "StorageEncrypted": true,
+      "AllocatedStorage": 100,
+      "Endpoint": {
+        "Address": "dspm-postgres.cdefgh.ap-northeast-2.rds.amazonaws.com",
+        "Port": 5432
+      }
+    }
+  ]
+}
