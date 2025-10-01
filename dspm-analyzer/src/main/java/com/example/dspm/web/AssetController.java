@@ -1,4 +1,4 @@
-package com.example.analyzer.asset;
+package com.example.dspm.web;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;

@@ -1,4 +1,4 @@
-package com.example.analyzer.asset;
+package com.example.dspm.domain;
 
 public enum AssetKind {
     ObjectStore, FileStore, BlockStore,

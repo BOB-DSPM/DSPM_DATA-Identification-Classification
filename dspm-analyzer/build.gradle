@@ -21,10 +21,9 @@ dependencies {
     // PostgreSQL JDBC
     runtimeOnly 'org.postgresql:postgresql'
 
-    // JSONB 매핑용(Hibernate 6.x용)
+    // JSONB 매핑
     implementation 'com.vladmihalcea:hibernate-types-60:2.21.1'
 
-    // Lombok (선택이지만 강추)
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
     testCompileOnly 'org.projectlombok:lombok'

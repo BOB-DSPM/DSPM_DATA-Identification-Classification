@@ -11,7 +11,7 @@ impl Collector for S3Collector {
     fn name(&self) -> &'static str { "s3" }
 
     async fn discover(&self, regions: &[String]) -> anyhow::Result<Vec<Asset>> {
-        // MOCK_MODE 확인
+        // MOCK_MODE
         if std::env::var("MOCK_MODE").is_ok() {
             let data = tokio::fs::read_to_string("mocks/s3_list_buckets.json").await?;
             let parsed: serde_json::Value = serde_json::from_str(&data)?;

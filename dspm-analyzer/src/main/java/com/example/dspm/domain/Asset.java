@@ -1,11 +1,13 @@
-package com.example.analyzer.asset;
+package com.example.dspm.domain;
 
-import com.vladmihalcea.hibernate.type.json.JsonBinaryType;
+import com.example.dspm.domain.AssetKind;
+import com.vladmihalcea.hibernate.type.json.JsonType;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.Type;
 
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.Map;
 
 @Entity
@@ -16,10 +18,10 @@ public class Asset {
 
     @Id
     @Column(length = 512)
-    private String id;               // 수집기가 주는 global key(arn 등)
+    private String id;
 
     @Column(nullable = false, length = 64)
-    private String service;          // "s3", "rds", ...
+    private String service;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 32)
@@ -41,14 +43,23 @@ public class Asset {
     @Column(length = 256)
     private String kmsKeyId;
 
-    @Type(JsonBinaryType.class)
+    // Hibernate 6 + hibernate-types-60
+    @Type(JsonType.class)
     @Column(columnDefinition = "jsonb")
-    private Map<String, String> tags;
+    @Builder.Default
+    private Map<String, String> tags = new HashMap<>();
 
-    @Type(JsonBinaryType.class)
+    @Type(JsonType.class)
     @Column(columnDefinition = "jsonb")
-    private Map<String, Object> metadata;
+    @Builder.Default
+    private Map<String, Object> metadata = new HashMap<>();
 
     @Column(nullable = false, columnDefinition = "timestamptz")
     private OffsetDateTime updatedAt;
+
+    @PrePersist
+    @PreUpdate
+    public void touchUpdatedAt() {
+        this.updatedAt = OffsetDateTime.now();
+    }
 }

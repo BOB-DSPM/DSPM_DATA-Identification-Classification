@@ -1,5 +1,6 @@
-package com.example.analyzer.asset;
+package com.example.dspm.web.dto;
 
+import com.example.dspm.domain.AssetKind;
 import lombok.Data;
 import java.util.Map;
 
