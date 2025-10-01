@@ -5,10 +5,10 @@ import com.example.dspm.repo.AssetRepository;
 import com.example.dspm.web.dto.AssetDTO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.util.ArrayList;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -16,27 +16,26 @@ public class AssetService {
 
     private final AssetRepository repo;
 
-    @Transactional
     public void upsertBulk(List<AssetDTO> dtos) {
-        List<Asset> entities = new ArrayList<>(dtos.size()); 
+        var entities = dtos.stream().map(dto -> {
+            var entity = repo.findById(dto.getId()).orElseGet(Asset::new);  // ✅ getId()
 
-        for (var dto : dtos) {
-            // DTO가 record라면 접근자는 id(), service() ...
-            var entity = repo.findById(dto.id()).orElseGet(Asset::new);
-            entity.setId(dto.id());
-            entity.setService(dto.service());
-            entity.setKind(dto.kind());
-            entity.setRegion(dto.region());
-            entity.setName(dto.name());
-            entity.setUri(dto.uri());
-            entity.setSizeBytes(dto.sizeBytes());
-            entity.setEncrypted(dto.encrypted());
-            entity.setKmsKeyId(dto.kmsKeyId());
-            entity.setTags(dto.tags());
-            entity.setMetadata(dto.metadata());
-            entities.add(entity);
-        }
+            entity.setId(dto.getId());
+            entity.setService(dto.getService());
+            entity.setKind(dto.getKind());
+            entity.setRegion(dto.getRegion());
+            entity.setName(dto.getName());
+            entity.setUri(dto.getUri());
+            entity.setSizeBytes(dto.getSizeBytes());
+            entity.setEncrypted(dto.getEncrypted());
+            entity.setKmsKeyId(dto.getKmsKeyId());
+            entity.setTags(dto.getTags());
+            entity.setMetadata(dto.getMetadata());
+            entity.setUpdatedAt(OffsetDateTime.now());
 
-        repo.saveAll(entities); // Iterable<Asset>
+            return entity;
+        }).collect(Collectors.toList());
+
+        repo.saveAll(entities);
     }
 }

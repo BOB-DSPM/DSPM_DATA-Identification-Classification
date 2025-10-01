@@ -1,7 +1,7 @@
 package com.example.dspm.domain;
 
 import com.example.dspm.domain.AssetKind;
-import com.vladmihalcea.hibernate.type.json.JsonType;
+import io.hypersistence.utils.hibernate.type.json.JsonType;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.Type;

@@ -31,6 +31,10 @@ jobs:
           file: ./dspm-analyzer/Dockerfile
           push: true
           tags: comnyang/analyzer:latest
+          build-args: |
+            DB_URL=${{ secrets.DB_URL }}
+            DB_USERNAME=${{ secrets.DB_USERNAME }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -45,6 +49,15 @@ jobs:
             --region ap-northeast-2 \
             --name ${{ secrets.EKS_CLUSTER_NAME }}
 
-      - name: Rollout restart analyzer
+      - name: Deploy to EKS with RDS configuration
         run: |
+          # Update deployment with RDS environment variables
+          kubectl set env deployment/analyzer -n dspm \
+            DB_URL="${{ secrets.DB_URL }}" \
+            DB_USERNAME="${{ secrets.DB_USERNAME }}" \
+            DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+            DB_DDL_AUTO="validate" \
+            DB_SHOW_SQL="false"
+          
+          # Rollout restart to apply changes
           kubectl rollout restart deployment analyzer -n dspm
