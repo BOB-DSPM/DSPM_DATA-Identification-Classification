@@ -1,9 +1,11 @@
-FROM rust:1.75 AS builder
+FROM rust:latest AS builder
 
 WORKDIR /app
 
+# Copy source code and build directly
 COPY . .
 
+# Build the application
 RUN cargo build --release
 
 FROM debian:bookworm-slim
