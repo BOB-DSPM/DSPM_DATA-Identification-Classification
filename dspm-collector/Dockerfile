@@ -8,7 +8,7 @@ COPY . .
 # Build the application
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup --system dspm && adduser --system --group dspm
+RUN groupadd --system dspm && useradd --system --gid dspm dspm
 
 COPY --from=builder /app/target/release/dspm-collector /usr/local/bin/dspm-collector
 
