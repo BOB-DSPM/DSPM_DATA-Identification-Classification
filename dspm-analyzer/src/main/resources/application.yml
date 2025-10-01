@@ -1,18 +1,19 @@
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/dspm
-    username: dspm
-    password: dspm
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/dspm}
+    username: ${DB_USERNAME:dspm}
+    password: ${DB_PASSWORD:dspm}
     driver-class-name: org.postgresql.Driver   
+  jpa:
     hibernate:
-      ddl-auto: update  
+      ddl-auto: ${DB_DDL_AUTO:update}
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         jdbc:
           time_zone: UTC
         format_sql: true
-    show-sql: true        
+    show-sql: ${DB_SHOW_SQL:true}
   open-in-view: false
 
 server:
