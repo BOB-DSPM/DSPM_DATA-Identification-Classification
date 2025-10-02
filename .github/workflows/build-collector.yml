@@ -43,7 +43,8 @@ jobs:
         run: |
           aws eks update-kubeconfig \
             --region ap-northeast-2 \
-            --name ${{ secrets.EKS_CLUSTER_NAME }}
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --role-arn arn:aws:iam::651706765732:role/EksAdminRole
 
       - name: Rollout restart collector
         run: |
