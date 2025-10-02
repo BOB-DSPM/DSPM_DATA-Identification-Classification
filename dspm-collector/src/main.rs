@@ -1,11 +1,11 @@
 mod collector_core;
 mod collectors;
-mod out;
+mod out; // 이미 있는 출력 모듈(emit_stdout, http 전송 등)
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use collectors::{build_collectors, ServiceKind};
-use out::{http::post_batches, emit_stdout, OutMode};
+use out::{emit_stdout, http::post_batches, OutMode};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum OutModeArg {
@@ -25,7 +25,7 @@ impl From<OutModeArg> for OutMode {
 #[derive(Parser, Debug)]
 #[command(name = "dspm-collector", version, author, about = "DSPM asset collector")]
 struct Opts {
-    /// 수집할 서비스 (콤마 구분): s3
+    /// 수집할 서비스 (콤마 구분): s3,ec2
     #[arg(long)]
     services: String,
 
