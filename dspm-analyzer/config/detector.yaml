@@ -1,0 +1,34 @@
+entities:
+  include:
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - LOCATION
+    - ID_NUMBER
+    - CREDIT_CARD
+    - IP_ADDRESS
+    - DATE_TIME
+    - SENSITIVE_BELIEF
+    - SENSITIVE_POLITICAL
+    - SENSITIVE_UNION
+    - SENSITIVE_HEALTH
+    - SENSITIVE_SEX_LIFE
+thresholds:
+  ID_NUMBER: 0.75
+  SENSITIVE_HEALTH: 0.70
+  SENSITIVE_BELIEF: 0.72
+weights:
+  pattern: 0.6
+  lexicon: 0.5
+  classifier: 0.7
+  context: 0.2
+windows:
+  classifier_char_radius: 120
+overlaps:
+  prefer_generic: true
+  keep_secondary: false
+io:
+  output_format: "jsonl"
+  mask:
+    EMAIL_ADDRESS: true
+    CREDIT_CARD: true
+    ID_NUMBER: true

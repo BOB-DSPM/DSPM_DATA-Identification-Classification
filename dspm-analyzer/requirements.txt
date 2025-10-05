@@ -1,6 +1,6 @@
-fastapi
-uvicorn[standard]
-SQLAlchemy>=2
-psycopg2-binary
-pydantic>=2
-python-dotenv
+presidio-analyzer==2.2.354
+presidio-anonymizer==2.2.354
+spacy>=3.6.0,<4.0.0
+
+# Optional: if you want English NER improvements (download model separately)
+# en-core-web-lg is installed via: python -m spacy download en_core_web_lg
