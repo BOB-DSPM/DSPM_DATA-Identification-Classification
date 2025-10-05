@@ -260,6 +260,12 @@ def analyze_payload(blobs: List[Dict[str, Any]], use_deep: bool = True) -> List[
                 }
             else:
                 report["findings"] = {"values_in_text": scan_text_for_pii(text)}
+                if deep_scan_text and mode in ("standard", "deep"):
+                    try:
+                        d = deep_scan_text(text)
+                        report["findings"]["deep"] = d.get("merged", [])
+                    except Exception:
+                        report["findings"]["deep"] = []
 
             # Deep mode (Presidio ML + your custom recognizers) if available & warranted
             # inside analyze_payload(...) after building report["findings"] for CSV:
@@ -273,7 +279,8 @@ def analyze_payload(blobs: List[Dict[str, Any]], use_deep: bool = True) -> List[
                     if not blob:
                         continue
                     try:
-                        deep_hits.extend(deep_scan_text(blob))
+                        d = deep_scan_text(blob)            # dict
+                        deep_hits.extend(d.get("merged", []))  # <- merged만 누적
                     except Exception:
                         pass
                 report["findings"]["deep"] = deep_hits
@@ -298,7 +305,8 @@ def analyze_payload(blobs: List[Dict[str, Any]], use_deep: bool = True) -> List[
                 walk(metrics)
                 if flat_texts:
                     try:
-                        report["findings"]["deep"] = deep_scan_text(" | ".join(flat_texts))
+                        d = deep_scan_text(" | ".join(flat_texts))
+                        report["findings"]["deep"] = d.get("merged", [])
                     except Exception:
                         report["findings"]["deep"] = []
 
