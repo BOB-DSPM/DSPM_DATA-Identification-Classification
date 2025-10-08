@@ -12,7 +12,15 @@
     "size": 20480,
     "last_modified": "2025-09-28T12:00:00+00:00",
     "content": {
-      "text": "emp_id,full_name,email,rrn_like,bank_card,ip\n1001,홍길동,hong@example.kr,900101-1234567,4111 1111 1111 1111,203.0.113.45\n1002,최지우,jiwoo.choi@example.com,8812311234567,5500-0000-0000-0004,198.51.100.23\n"
+      "text": "emp_id,full_name,email,rrn_like,bank_card,ip\n1001,홍길동,hong@example.kr,900101-1234567,4111 1111 1111 1111,203.0.113.45\n1002,최지우,jiwoo.choi@example.com,900101-1000006,5500-0000-0000-0004,198.51.100.23\n"
+    }
+  },
+  {
+    "key": "profiles/socio_demo_survey.csv",
+    "size": 6144,
+    "last_modified": "2025-10-02T06:10:00+00:00",
+    "content": {
+      "text": "id,gender,marital,education,language,notes\n1,여성,기혼,학사,모국어: 한국어,\"가시적소수 집단 여부: 해당\"\n2,남성,미혼,박사,영어,\"다문화 배경 있음\"\n"
     }
   },
   {
