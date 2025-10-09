@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Tuple, Optional
 # Presidio 준비(선택)
 # =========================================================
 ENGINE_PII_AVAILABLE = False
+SPLIT_BY_ENTITY = True
 try:
     from engine_pii import analyze_text as _presidio_analyze_text
     from engine_pii import list_loaded_recognizers as _presidio_list_loaded
@@ -111,7 +112,7 @@ ID_HEADER_HINTS_DL        = ["driver","driver_license","license_no","dl_number",
 # 라우팅 판단용 엔티티
 ID_ENTS = {"KR_RRN","KR_FRN","KR_PASSPORT","KR_DRIVER_LICENSE"}
 PIPA_ENTS = {"KOREAN_PIPA_POLITICAL","KOREAN_PIPA_UNION","KOREAN_PIPA_HEALTH","KOREAN_PIPA_SEX_LIFE","KOREAN_PIPA_BELIEF"}
-GENERAL_PII = {"EMAIL_ADDRESS","PHONE_NUMBER","IP_ADDRESS","CREDIT_CARD","KOREAN_ADDRESS","KR_BANK_ACCOUNT","DATE_OF_BIRTH","ICD10_CODE","CARD_CVV","CARD_EXPIRY","CARD_ISSUER", "KR_NAME","KR_NAME_ROMA"}
+GENERAL_PII = {"EMAIL_ADDRESS","PHONE_NUMBER","IP_ADDRESS","CREDIT_CARD","KOREAN_ADDRESS","KR_BANK_ACCOUNT","DATE_OF_BIRTH","CARD_CVV","CARD_EXPIRY","CARD_ISSUER", "KR_NAME","KR_NAME_ROMA"}
 
 # 파일명 위험 힌트
 HINTS_SENSITIVE   = ["political","union","religion","belief","sex","health","medical","diagnosis","patient","pregnancy"]
@@ -121,6 +122,11 @@ HINTS_PII         = ["pii","private","confidential","secret","customer","user","
 # =========================================================
 # 2) 유틸/마스킹
 # =========================================================
+def _safe_key_filename(orig_key: str) -> str:
+    safe = re.sub(r'[<>:"\\|?*]', "", orig_key or "unknown")
+    safe = safe.strip().replace("..", ".")
+    return safe.strip("/")
+
 def ensure_list(d: Dict[str, List[str]], key: str):
     if key not in d: d[key] = []
 
@@ -143,7 +149,7 @@ def _mask_pan(s: str) -> str:
     return f"{'*'*(len(d)-4)}{d[-4:]}"
 
 def _mask_values_for_console(values: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    # 콘솔 출력용 — 마스킹 해제 (원문 그대로 표시)
+    # 마스킹 해제 
     return values
 
 def _norm_hyphen(s: str) -> str:
@@ -507,6 +513,26 @@ def _merge_presidio_hits_into_findings(findings: Dict[str,Any], hits: List[Dict[
 # =========================================================
 # 9) 분류 로직
 # =========================================================
+def _bucket_for_entity(ent: str) -> str:
+    """
+    PIPA 기준 버킷 매핑:
+      - 민감정보(sensitive): 건강/신념/정치/노조/성생활 등
+      - 고유식별(identifiers): 주민번호/외국인등록/여권/운전면허
+      - 그 외 개인정보(public): 이메일/전화/주소/카드/계좌/생년월일/CVV 등
+    """
+    ent = (ent or "").upper()
+
+    # PIPA 민감정보
+    if ent in PIPA_ENTS or ent == "ICD10_CODE":
+        return "sensitive"
+
+    # 고유식별
+    if ent in ID_ENTS:
+        return "identifiers"
+
+    # 나머지 
+    return "public"
+
 def build_target_path(category: str, key: str) -> str:
     fname = os.path.basename(key)
     base = {"public":"public","sensitive":"sensitive","identifiers":"identifiers"}.get(category,"public")
@@ -515,30 +541,39 @@ def build_target_path(category: str, key: str) -> str:
 def decide_category(meta: Dict[str,Any],
                     findings: Dict[str,Any],
                     presidio_hits: List[Dict[str,Any]]) -> Tuple[str,str]:
+    """
+    최종 카테고리 구분:
+      - identifiers : 고유식별정보 포함
+      - sensitive   : PIPA 민감(정치/노조/신념/성생활/건강) 또는 ICD10_CODE 포함
+      - public      : 일반 개인정보(이메일/전화/주소/계좌/카드/DOB/이름 등) 포함
+      - none        : 본문/메타 모두 개인정보 신호 없음
+    """
     meta_vals = (meta or {}).get("values", {})
     body_vals = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
-    ents = set(meta_vals.keys()) | set(body_vals.keys()) | {h.get("entity") for h in presidio_hits}
+
+    # 엔티티 대문자 정규화 (None 방지)
+    ents_meta = {(k or "").upper() for k in meta_vals.keys()}
+    ents_body = {(k or "").upper() for k in body_vals.keys()}
+    ents_pres = {(h.get("entity") or "").upper() for h in presidio_hits if h.get("entity")}
+    ents = ents_meta | ents_body | ents_pres
 
     hints = (meta.get("risk_hints") or {}).get("matched", [])
     low_hints = [h.lower() for h in hints]
 
-    if "CARD_CVV" in ents:
-        return "sensitive", "결제 보안코드(CVV) 포함(PCI-DSS 저장 금지)"
-    if ("CREDIT_CARD" in ents) and (("CARD_CVV" in ents) or ("CARD_EXPIRY" in ents)):
-        return "sensitive", "카드번호와 결제정보 조합 포함"
-    if TREAT_CREDIT_CARD_AS_SENSITIVE and "CREDIT_CARD" in ents:
-        return "sensitive", "신용카드 포함(정책에 따라 민감으로 격상)"
-
+    # 1) 고유식별 우선
     if ents & ID_ENTS or any(h in low_hints for h in HINTS_IDENTIFIERS):
         return "identifiers", "고유식별정보 포함"
 
-    if ents & PIPA_ENTS or any(h in low_hints for h in HINTS_SENSITIVE):
+    # 2) 민감(PIPA) 또는 ICD-10(건강정보)
+    if (ents & PIPA_ENTS) or ("ICD10_CODE" in ents) or any(h in low_hints for h in HINTS_SENSITIVE):
         return "sensitive", "민감정보 포함"
 
-    if ents & GENERAL_PII or any(h in low_hints for h in HINTS_PII):
-        return "public", "일반 개인정보 포함"
+    # 3) 일반 개인정보
+    if (ents & GENERAL_PII) or any(h in low_hints for h in HINTS_PII):
+        return "public", "개인정보 포함"
 
-    return "public", "민감 신호 없음"
+    # 4) 아무 신호도 없으면 none
+    return "none", "개인정보 없음"
 
 # =========================================================
 # 10) 콘솔/리포트 빌드
@@ -563,9 +598,20 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
     else:
         lines.append(" ├─ 본문 탐지: 없음")
 
-    target = build_target_path(category, key)
+    # 파일 전체 카테고리(최고등급) 표시는 유지
     lines.append(f" ├─ 분류: {category} ({reason})")
-    lines.append(f" │   → 저장 경로: {target}")
+
+    # 엔티티별 저장 경로 표시
+    if body_vals:
+        safe_key = _safe_key_filename(key)
+        lines.append(" ├─ 저장 경로(엔티티별):")
+        for ent, vals in body_vals.items():
+            if not vals:
+                continue
+            bucket = _bucket_for_entity(ent)
+            per_ent_path = f"{CLASSIFY_ROOT}/{bucket}/{safe_key}__{ent}.txt"
+            lines.append(f" │   • {ent}: {per_ent_path}")
+
     lines.append(" └────────────────────────────")
     return "\n".join(lines)
 
@@ -603,6 +649,17 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
         ctype = "unknown"
 
     category, reason = decide_category(meta, findings, presidio_hits)
+    
+    # 엔티티별 저장 경로 계산
+    body_vals_for_paths = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
+    safe_key = _safe_key_filename(key)
+    saved_paths = {}
+    for ent, vals in (body_vals_for_paths or {}).items():
+        if not vals:
+            continue
+        bucket = _bucket_for_entity(ent)
+        saved_paths[ent] = f"{CLASSIFY_ROOT}/{bucket}/{safe_key}__{ent}.txt"
+
     console_like = build_console_like(key, ctype, findings, category, reason)
 
     report = {
@@ -617,7 +674,8 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
         "classification": {
             "category": category,
             "reason": reason,
-            "target_path": build_target_path(category, key)
+            # 엔티티별 경로 제공
+            "saved_paths": saved_paths
         },
         "console_like": console_like
     }
@@ -629,33 +687,90 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
 def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     console_blocks: List[str] = []
 
+    # 콘솔 출력(요약)과 결과 JSON 저장은 유지
     for r in reports:
-        body_detected = r.get("body", {}).get("detected", {})
+        body_detected = r.get("body", {}).get("detected", {}) or {}
         if body_detected:
             block = "\n" + r["console_like"]
             print(block)
             console_blocks.append(block)
 
+        # === 기존 full 결과 저장 ===
     out_json_path.write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n결과 JSON 저장: {out_json_path.resolve()}")
 
-    console_path = out_json_path.with_suffix(".console.txt")
+    # ✅ front용 경량 결과도 따로 저장
+    front_reports = []
+    for r in reports:
+        file = r.get("file")
+        findings = r.get("body", {}).get("detected", {})
+        category = r.get("classification", {}).get("category")
+        reason = r.get("classification", {}).get("reason")
+        saved_paths = r.get("classification", {}).get("saved_paths", {})
+        front_reports.append({
+            "file": file,
+            "source": _derive_source_label(file),  
+            "type": r.get("type"),
+            "category": category,
+            "reason": reason,
+            "risk_hints": r.get("metadata", {}).get("risk_hints", {}), 
+            "stats": {                                         
+                "rows_scanned": r.get("body", {}).get("rows_scanned"),
+                "total_entities": len(findings or {}),
+                "unique_entity_types": list((findings or {}).keys())
+            },
+            "entities": {
+                ent: {
+                    "count": len(vals),
+                    "bucket": _bucket_for_entity(ent),
+                    "values": vals,
+                    "saved_path": saved_paths.get(ent)
+                }
+                for ent, vals in findings.items()
+            }
+        })
+    front_path = out_json_path.parent / "results_front.json"
+    front_path.write_text(json.dumps(front_reports, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Front 결과 저장: {front_path.resolve()}")
+
+    # 콘솔 사본 파일 저장
+    console_path = out_json_path.parent / "results.console.txt"
     if console_blocks:
         console_path.write_text("\n".join(console_blocks) + "\n", encoding="utf-8")
     else:
         console_path.write_text("# 본문 탐지 결과가 있는 항목이 없어 콘솔 출력이 없습니다.\n", encoding="utf-8")
     print(f"콘솔 출력 사본 저장: {console_path.resolve()}")
 
+    # === 저장 로직: 엔티티별로만 저장 ===
     base_dir = out_json_path.parent
+
     for r in reports:
-        target_path = base_dir / r["classification"]["target_path"]
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        content_text = (
-            f"# Original key: {r['file']}\n"
-            f"# Type: {r['type']}\n\n"
-            f"## Console-like\n{r['console_like']}\n"
-        )
-        target_path.write_text(content_text, encoding="utf-8")
+        body_detected: Dict[str, List[str]] = r.get("body", {}).get("detected", {}) or {}
+        if not body_detected:
+            continue
+
+        # 원본 키를 파일명으로 안전하게 변환
+        safe_key = re.sub(r"[<>:\"\\|?*]", "", r.get("file", "unknown"))
+        safe_key = safe_key.strip().replace("..", ".")
+        safe_key = safe_key.strip("/")
+
+        # 각 엔티티를 PIPA 버킷 규칙(public / sensitive / identifiers)으로 나눠 저장
+        for ent, vals in body_detected.items():
+            if not vals:
+                continue
+            bucket = _bucket_for_entity(ent)  # public / sensitive / identifiers
+            per_ent_path = base_dir / CLASSIFY_ROOT / bucket / f"{safe_key}__{ent}.txt"
+            per_ent_path.parent.mkdir(parents=True, exist_ok=True)
+
+            per_ent_content = [
+                f"# Original key: {r['file']}",
+                f"# Type: {r['type']}",
+                f"# Entity: {ent}",
+                "",
+                "## Values",
+            ] + [str(v) for v in vals]
+
+            per_ent_path.write_text("\n".join(per_ent_content) + "\n", encoding="utf-8")
 
 # =========================================================
 # 13) 페이로드 전개(핵심 추가)
@@ -664,7 +779,7 @@ def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict
     try:
         text = (blob.get("content") or {}).get("text", "")
         if (not text) or (not text.strip().startswith(("[", "{"))):
-            return _fallback_plain_text_scan(blob)
+            return None
 
         parsed = json.loads(text)
         if not isinstance(parsed, list):

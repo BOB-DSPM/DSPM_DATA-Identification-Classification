@@ -31,6 +31,5 @@ class PipaHealthLexiconRecognizer(PatternRecognizer):
             supported_entity="KOREAN_PIPA_HEALTH",
             patterns=[self._icd10, *self._health_terms],
             context=["건강", "의료", "진단", "처방", "기록", "medical", "health", "환자", "내원"],
-            # 언어 필터 우회(엔진에서 ko→en 병합 보정도 있지만 명시적으로 허용)
             supported_language=["ko", "en"],
         )
