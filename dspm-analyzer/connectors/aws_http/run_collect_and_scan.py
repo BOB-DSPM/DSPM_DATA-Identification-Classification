@@ -243,10 +243,10 @@ def collect_and_scan(
                     # 본문이 없으면 객체 json 자체를 본문으로라도 사용(최소한의 탐지 보장)
                     content_text = json.dumps(obj, ensure_ascii=False, indent=2)
 
-                # 보고서용 blob: display_key는 실제 객체 키 그대로!
+                # blob: display_key는 실제 객체 키 그대로!
                 blobs.append(
                     _make_blob_for_report(
-                        display_key=obj_key,
+                        display_key=f"s3/explorer/{name}/{obj_key}",
                         content_text=content_text,
                         source_hint=f"s3/{name}",
                     )

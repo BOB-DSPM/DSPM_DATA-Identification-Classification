@@ -143,17 +143,8 @@ def _mask_pan(s: str) -> str:
     return f"{'*'*(len(d)-4)}{d[-4:]}"
 
 def _mask_values_for_console(values: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    if DEBUG_UNMASK:
-        return values
-    masked = {}
-    for k, arr in values.items():
-        if k == "CREDIT_CARD":
-            masked[k] = [_mask_pan(x) for x in arr]
-        elif k == "CARD_CVV":
-            masked[k] = ["***" for _ in arr]
-        else:
-            masked[k] = arr
-    return masked
+    # 콘솔 출력용 — 마스킹 해제 (원문 그대로 표시)
+    return values
 
 def _norm_hyphen(s: str) -> str:
     return (s or "").translate({ord(c):'-' for c in "\u2010\u2011\u2012\u2013\u2014\u2015"})
@@ -670,23 +661,29 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
 # 13) 페이로드 전개(핵심 추가)
 # =========================================================
 def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
-    """
-    blob.content.text 가 JSON(리스트) 형태로, 각 항목이 {key, size, last_modified, content:{text:...}} 구조면
-    내부 항목들을 '가짜 블롭'으로 전개해서 반환. 아니면 None.
-    """
     try:
         text = (blob.get("content") or {}).get("text", "")
         if (not text) or (not text.strip().startswith(("[", "{"))):
             return _fallback_plain_text_scan(blob)
+
         parsed = json.loads(text)
         if not isinstance(parsed, list):
             return None
+
+        # 부모 key에서 .json 접미어 제거 후 prefix로 사용
+        parent_key = (blob.get("key") or "")
+        parent_prefix = re.sub(r"\.json$", "", parent_key)
+
         children = []
         for item in parsed:
             if not isinstance(item, dict):
                 return None
             if "key" in item and "content" in item:
-                children.append(item)
+                # 내부 항목의 key 앞에 부모 경로를 붙여, 파일 라인에 풀경로가 찍히게 함
+                child = dict(item)  # shallow copy
+                child_key = str(child.get("key", "")).lstrip("/")
+                child["key"] = f"{parent_prefix}/{child_key}"
+                children.append(child)
             else:
                 return None
         return children if children else None
