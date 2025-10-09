@@ -18,7 +18,8 @@ from main import analyze_one_blob, organize_and_save
 API_TIMEOUT = 12.0
 
 
-# ----------------------------- HTTP helpers -----------------------------
+# ============================= 공통 유틸 =============================
+
 def _req_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
     r = requests.get(url, params=params, timeout=API_TIMEOUT, headers={"accept": "application/json"})
     r.raise_for_status()
@@ -29,17 +30,14 @@ def _req_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
 
 
 def _probe_endpoint(base: str, use_api_prefix: bool) -> bool:
-    """
-    주어진 base에 대해 실제 라우트가 살아있는지 프로브.
-    - 가장 가벼운 엔드포인트인 s3-buckets를 조회해봄.
-    """
+    """가볍게 s3-buckets로 살아있는지 점검"""
     base = base.rstrip("/")
     path = "/api/s3-buckets" if use_api_prefix else "/s3-buckets"
     url = base + path
     try:
         r = requests.get(url, timeout=API_TIMEOUT, headers={"accept": "application/json"})
         if r.status_code == 200:
-            _ = r.json()  # JSON parse 검증
+            _ = r.json()
             return True
         return False
     except Exception:
@@ -48,26 +46,23 @@ def _probe_endpoint(base: str, use_api_prefix: bool) -> bool:
 
 def _resolve_api_base(user_base: str) -> Tuple[str, bool]:
     """
-    사용자가 준 --api를 바탕으로 실제 동작하는 베이스와 /api 프리픽스 유무를 탐색.
-    탐색 순서:
+    --api 자동 해석:
       1) user_base + /api
-      2) user_base (no /api)
+      2) user_base
       3) user_base/explorer + /api
-      4) user_base/explorer (no /api)
+      4) user_base/explorer
     """
-    candidates = []
     ub = user_base.rstrip("/")
-    candidates.append((ub, True))
-    candidates.append((ub, False))
-    candidates.append((ub + "/explorer", True))
-    candidates.append((ub + "/explorer", False))
-
+    candidates = [
+        (ub, True),
+        (ub, False),
+        (ub + "/explorer", True),
+        (ub + "/explorer", False),
+    ]
     for base, use_api in candidates:
         if _probe_endpoint(base, use_api):
             print(f"[info] API base resolved: {base}  (use_api_prefix={use_api})")
             return base, use_api
-
-    # 마지막으로 그냥 사용자 입력 그대로 반환(실패 시 예외는 밑에서 터짐)
     print(f"[warn] Could not auto-resolve API base. Using user provided: {user_base} (assume /api prefix).")
     return ub, True
 
@@ -80,55 +75,67 @@ def _api_get(base: str, use_api_prefix: bool, path: str, params: Optional[Dict[s
         path = "/api" + path
     url = base + path
     return _req_json(url, params=params)
-# ------------------------------------------------------------------------
 
 
-# ----------------------------- I/O helpers ------------------------------
 def _safe_key(s: str) -> str:
-    """파일명 안전화를 위한 간단한 정규화 (경로 구분자는 그대로 두고 파일명만 정리)"""
+    """파일명 안전화 (경로 구분자는 유지하고 위험 문자만 제거)"""
     banned = '<>:"\\|?*'
     return "".join(c for c in s if c not in banned)
 
 
 def _dump_one_payload(dump_dir: Path, service: str, key: str, payload: Any) -> Path:
+    """
+    dump_dir/<service>/<key(.json)> 로 덤프
+    service, key 모두 절대 경로 조합을 존중
+    """
     service = _safe_key(service)
     key = _safe_key(key)
-
-    # 키가 이미 .json 으로 끝나면 그대로, 아니면 .json 덧붙임
     filename = key if key.endswith(".json") else f"{key}.json"
     out_file = dump_dir / service / filename
     out_file.parent.mkdir(parents=True, exist_ok=True)
-
     if isinstance(payload, str):
         out_file.write_text(payload, encoding="utf-8")
     else:
         out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return out_file
-# ------------------------------------------------------------------------
 
 
-# --------------------------- blob construction --------------------------
-def _make_blob_for_report(
-    display_key: str,
-    content_text: str,
-    *,
-    source_hint: Optional[str] = None,
-) -> Dict[str, Any]:
+def _display_path(service: str, kind: str, ident: str, leaf: Optional[str] = None, *, ext: Optional[str] = None) -> str:
     """
-    main.analyze_one_blob 이 기대하는 페이로드 형태
-    - key: 보고서에 '파일:'로 표기될 경로/이름 (여기서는 실제 객체 키 그대로 사용)
-    - content.text: 분석할 본문
-    - metadata.source: '소스:' 표기용 힌트 (예: s3/my-bucket)
+    절대 경로용 표시 키 생성
+    ex) _display_path("dynamodb","explorer","users","item-001", ext=".json")
+        -> "dynamodb/explorer/users/item-001.json"
     """
+    p = f"{service.strip('/')}/{kind.strip('/')}/{ident.strip('/')}"
+    if leaf:
+        p += f"/{leaf.strip('/')}"
+    if ext:
+        p += ext
+    return p
+
+
+def _obj_text_from_common(obj: Dict[str, Any]) -> Optional[str]:
+    """explorer 항목에서 본문 텍스트 후보를 공통 규칙으로 추출"""
+    if isinstance(obj.get("content"), dict) and isinstance(obj["content"].get("text"), str):
+        return obj["content"]["text"]
+    if isinstance(obj.get("body"), str):
+        return obj["body"]
+    if isinstance(obj.get("Text"), str):
+        return obj["Text"]
+    return None
+
+
+def _make_blob_for_report(display_key: str, content_text: str, *, source_hint: Optional[str] = None) -> Dict[str, Any]:
     blob = {
-        "key": display_key,                 # 실제 파일명/키 그대로!
-        "content": {"text": content_text},  # 분석 본문
+        "key": display_key,
+        "content": {"text": content_text},
     }
     if source_hint:
         blob["metadata"] = {"source": source_hint}
     return blob
-# ------------------------------------------------------------------------
 
+
+# ============================= 메인 로직 =============================
 
 def collect_and_scan(
     api_base: str,
@@ -137,19 +144,14 @@ def collect_and_scan(
     dump_dir: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Path]]:
     """
-    services가 None이면 넓게 커버. 특정 서비스만 돌리고 싶으면 ["s3","efs"]처럼 지정.
-    dump_dir가 주어지면 수집된 원본을 파일로 남긴다.
-    반환:
-      - reports: analyzer 결과 리스트
-      - saved_files: dump_dir에 실제로 저장된 원본 파일 경로들
+    services: None이면 전체, 일부만 원하면 ["s3","dynamodb"] 처럼 전달
+    dump_dir: 원본 payload를 파일로 보관
     """
-    # --- API base 해석 ---
     base, use_api_prefix = _resolve_api_base(api_base)
 
     blobs: List[Dict[str, Any]] = []
     saved_files: List[Path] = []
 
-    # JSONL 전체 모음 파일 (선택)
     jsonl_fp = None
     if dump_dir is not None:
         dump_dir.mkdir(parents=True, exist_ok=True)
@@ -162,29 +164,23 @@ def collect_and_scan(
         *,
         display_key: Optional[str] = None,
         source_hint: Optional[str] = None,
-        analyze: bool = True,           # ← 추가
+        analyze: bool = True,
     ):
         # 1) dump
         if dump_dir is not None:
             path = _dump_one_payload(dump_dir, service, key, payload)
             saved_files.append(path)
-            record = {
-                "service": service,
-                "key": key,
-                "path": str(path),
-                "payload": payload,
-            }
-            jsonl_fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+            rec = {"service": service, "key": key, "path": str(path)}
+            jsonl_fp.write(json.dumps({**rec, "payload": payload}, ensure_ascii=False) + "\n")
 
-        # 2) analyze (옵션)
+        # 2) analyze
         if not analyze:
             return
-
         text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
         disp = display_key if display_key else f"{service}/{key}.json"
         blobs.append(_make_blob_for_report(disp, text, source_hint=source_hint))
 
-    # -------- S3 --------
+    # ---------------- S3 ----------------
     if services is None or "s3" in services:
         arr = _api_get(base, use_api_prefix, "s3-buckets")
         for it in arr or []:
@@ -192,67 +188,47 @@ def collect_and_scan(
             if not name:
                 continue
 
-            # repository 메타 (그대로 .json로 분석)
+            # repository -> 절대 경로로
             repo = _api_get(base, use_api_prefix, f"repositories/s3/{name}")
-            add_blob_record("s3/repository", name, repo, source_hint=f"s3/{name}")
+            repo_disp = _display_path("s3", "repository", name, ext=".json")
+            add_blob_record("s3", f"repository/{name}", repo, display_key=repo_disp, source_hint=f"s3/{name}")
 
-            # explorer: 버킷 안의 객체들을 개별 blob으로!
+            # explorer: 버킷 객체들을 개별 blob
             exp = _api_get(base, use_api_prefix, f"explorer/s3/{name}", params={"max_keys": 100})
-            # 가능한 구조: list, 혹은 {"objects":[...]} 등 다양한 형태를 방어적으로 처리
             if isinstance(exp, dict):
-                if "objects" in exp and isinstance(exp["objects"], list):
+                if isinstance(exp.get("objects"), list):
                     items = exp["objects"]
-                elif "Contents" in exp and isinstance(exp["Contents"], list):
+                elif isinstance(exp.get("Contents"), list):
                     items = exp["Contents"]
                 else:
-                    # dict 한 덩어리 그대로 저장/스캔(최악의 경우)
-                    add_blob_record("s3/explorer", name, exp, source_hint=f"s3/{name}", analyze=False)
+                    # 전체 덤프만 저장
+                    add_blob_record("s3", f"explorer/{name}", exp, source_hint=f"s3/{name}", analyze=False)
                     items = []
             elif isinstance(exp, list):
                 items = exp
             else:
-                # 문자열 등 비정형이면 통째로 저장/스캔
-                add_blob_record("s3/explorer", name, exp, source_hint=f"s3/{name}", analyze=False)
+                add_blob_record("s3", f"explorer/{name}", exp, source_hint=f"s3/{name}", analyze=False)
                 items = []
 
-            # 객체 단위로 분해
             for obj in items:
-                # 키 후보들
                 obj_key = obj.get("key") or obj.get("Key") or obj.get("object_key") or obj.get("name")
                 if not obj_key:
-                    # 키가 없으면 스킵
                     continue
 
-                # 내용 텍스트 확보
-                content_text: Optional[str] = None
-                # 1) explorer 응답이 content.text를 포함하는 경우(우선)
-                if isinstance(obj.get("content"), dict) and "text" in obj["content"]:
-                    content_text = obj["content"]["text"]
-                # 2) 일부 구현은 "body"나 "Text" 같은 키를 줄 수도 있음
-                elif "body" in obj and isinstance(obj["body"], str):
-                    content_text = obj["body"]
-                elif "Text" in obj and isinstance(obj["Text"], str):
-                    content_text = obj["Text"]
+                # dump 원본 (절대 경로 구조)
+                dump_key = f"explorer/{name}/{obj_key}"
+                add_blob_record("s3", dump_key, obj, source_hint=f"s3/{name}", analyze=False)
 
-                # dump는 객체 json 그대로 떨궈둠(추적 용이)
-                dump_key = f"{name}/{obj_key}"
-                add_blob_record("s3/explorer", dump_key, obj, source_hint=f"s3/{name}", analyze=False)
-
-                # 실제 분석은 "파일명 = 객체 키 그대로", "본문 = content_text 있으면 그걸로"
+                # 본문 텍스트
+                content_text = _obj_text_from_common(obj)
                 if content_text is None:
-                    # 본문이 없으면 객체 json 자체를 본문으로라도 사용(최소한의 탐지 보장)
                     content_text = json.dumps(obj, ensure_ascii=False, indent=2)
 
-                # blob: display_key는 실제 객체 키 그대로!
-                blobs.append(
-                    _make_blob_for_report(
-                        display_key=f"s3/explorer/{name}/{obj_key}",
-                        content_text=content_text,
-                        source_hint=f"s3/{name}",
-                    )
-                )
+                # 보고서용 display key는 S3 객체키 그대로(확장자 그대로, .json 미부착)
+                disp = _display_path("s3", "explorer", name, obj_key, ext=None)
+                blobs.append(_make_blob_for_report(disp, content_text, source_hint=f"s3/{name}"))
 
-    # -------- EFS --------
+    # ---------------- EFS ----------------
     if services is None or "efs" in services:
         arr = _api_get(base, use_api_prefix, "efs-filesystems")
         for it in arr or []:
@@ -260,9 +236,10 @@ def collect_and_scan(
             if not fsid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/efs/{fsid}")
-            add_blob_record("efs/repository", fsid, repo, source_hint=f"efs/{fsid}")
+            disp = _display_path("efs", "repository", fsid, ext=".json")
+            add_blob_record("efs", f"repository/{fsid}", repo, display_key=disp, source_hint=f"efs/{fsid}")
 
-    # -------- FSx --------
+    # ---------------- FSx ----------------
     if services is None or "fsx" in services:
         arr = _api_get(base, use_api_prefix, "fsx-filesystems")
         for it in arr or []:
@@ -270,9 +247,10 @@ def collect_and_scan(
             if not fsid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/fsx/{fsid}")
-            add_blob_record("fsx/repository", fsid, repo, source_hint=f"fsx/{fsid}")
+            disp = _display_path("fsx", "repository", fsid, ext=".json")
+            add_blob_record("fsx", f"repository/{fsid}", repo, display_key=disp, source_hint=f"fsx/{fsid}")
 
-    # -------- RDS --------
+    # ---------------- RDS ----------------
     if services is None or "rds" in services:
         arr = _api_get(base, use_api_prefix, "rds-instances")
         for it in arr or []:
@@ -280,9 +258,10 @@ def collect_and_scan(
             if not dbid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/rds/{dbid}")
-            add_blob_record("rds/repository", dbid, repo, source_hint=f"rds/{dbid}")
+            disp = _display_path("rds", "repository", dbid, ext=".json")
+            add_blob_record("rds", f"repository/{dbid}", repo, display_key=disp, source_hint=f"rds/{dbid}")
 
-    # -------- RDS Snapshots --------
+    # ------------- RDS Snapshots -------------
     if services is None or "rds-snapshot" in services or "rds-snapshots" in services:
         arr = _api_get(base, use_api_prefix, "rds-snapshots")
         for it in arr or []:
@@ -290,22 +269,54 @@ def collect_and_scan(
             if not sid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/rds-snapshot/{sid}")
-            add_blob_record("rds-snapshot/repository", sid, repo, source_hint=f"rds-snapshot/{sid}")
+            disp = _display_path("rds-snapshot", "repository", sid, ext=".json")
+            add_blob_record("rds-snapshot", f"repository/{sid}", repo, display_key=disp, source_hint=f"rds-snapshot/{sid}")
 
-    # -------- DynamoDB --------
+    # ---------------- DynamoDB ----------------
     if services is None or "dynamodb" in services:
         arr = _api_get(base, use_api_prefix, "dynamodb-tables")
         for it in arr or []:
             tname = it.get("table_name")
             if not tname:
                 continue
+
+            # repository
             repo = _api_get(base, use_api_prefix, f"repositories/dynamodb/{tname}")
-            add_blob_record("dynamodb/repository", tname, repo, source_hint=f"dynamodb/{tname}")
+            repo_disp = _display_path("dynamodb", "repository", tname, ext=".json")
+            add_blob_record("dynamodb", f"repository/{tname}", repo, display_key=repo_disp, source_hint=f"dynamodb/{tname}")
 
+            # explorer: row 단위로 쪼개 분석
             exp = _api_get(base, use_api_prefix, f"explorer/dynamodb/{tname}", params={"limit": 50})
-            add_blob_record("dynamodb/explorer", tname, exp, source_hint=f"dynamodb/{tname}")
+            items: List[Dict[str, Any]] = []
+            if isinstance(exp, dict):
+                for k in ("items", "Items", "rows", "Rows", "data", "Data"):
+                    if isinstance(exp.get(k), list):
+                        items = exp[k]
+                        break
+                if not items:
+                    # 덤프만 남김
+                    add_blob_record("dynamodb", f"explorer/{tname}", exp, source_hint=f"dynamodb/{tname}", analyze=False)
+            elif isinstance(exp, list):
+                items = exp
+            else:
+                add_blob_record("dynamodb", f"explorer/{tname}", exp, source_hint=f"dynamodb/{tname}", analyze=False)
 
-    # -------- Redshift --------
+            for idx, row in enumerate(items):
+                # 키/식별자 추출
+                leaf = (
+                    row.get("id") or row.get("ID") or row.get("pk") or row.get("PK")
+                    or row.get("user_id") or row.get("UserId") or str(idx)
+                )
+                # dump
+                dump_key = f"explorer/{tname}/{leaf}"
+                add_blob_record("dynamodb", dump_key, row, source_hint=f"dynamodb/{tname}", analyze=False)
+
+                # 보고서 key (절대 경로)
+                disp = _display_path("dynamodb", "explorer", tname, leaf, ext=".json")
+                content_text = json.dumps(row, ensure_ascii=False, indent=2)
+                blobs.append(_make_blob_for_report(disp, content_text, source_hint=f"dynamodb/{tname}"))
+
+    # ---------------- Redshift ----------------
     if services is None or "redshift" in services:
         arr = _api_get(base, use_api_prefix, "redshift-clusters")
         for it in arr or []:
@@ -313,9 +324,10 @@ def collect_and_scan(
             if not cid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/redshift/{cid}")
-            add_blob_record("redshift/repository", cid, repo, source_hint=f"redshift/{cid}")
+            disp = _display_path("redshift", "repository", cid, ext=".json")
+            add_blob_record("redshift", f"repository/{cid}", repo, display_key=disp, source_hint=f"redshift/{cid}")
 
-    # -------- ElastiCache --------
+    # ---------------- ElastiCache ----------------
     if services is None or "elasticache" in services:
         arr = _api_get(base, use_api_prefix, "elasticache-clusters")
         for it in arr or []:
@@ -323,9 +335,10 @@ def collect_and_scan(
             if not cid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/elasticache/{cid}")
-            add_blob_record("elasticache/repository", cid, repo, source_hint=f"elasticache/{cid}")
+            disp = _display_path("elasticache", "repository", cid, ext=".json")
+            add_blob_record("elasticache", f"repository/{cid}", repo, display_key=disp, source_hint=f"elasticache/{cid}")
 
-    # -------- Glacier --------
+    # ---------------- Glacier ----------------
     if services is None or "glacier" in services:
         arr = _api_get(base, use_api_prefix, "glacier-vaults")
         for it in arr or []:
@@ -333,9 +346,10 @@ def collect_and_scan(
             if not vname:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/glacier/{vname}")
-            add_blob_record("glacier/repository", vname, repo, source_hint=f"glacier/{vname}")
+            disp = _display_path("glacier", "repository", vname, ext=".json")
+            add_blob_record("glacier", f"repository/{vname}", repo, display_key=disp, source_hint=f"glacier/{vname}")
 
-    # -------- Backup --------
+    # ---------------- Backup ----------------
     if services is None or "backup" in services:
         arr = _api_get(base, use_api_prefix, "backup-plans")
         for it in arr or []:
@@ -343,7 +357,8 @@ def collect_and_scan(
             if not pid:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/backup/{pid}")
-            add_blob_record("backup/repository", pid, repo, source_hint=f"backup/{pid}")
+            disp = _display_path("backup", "repository", pid, ext=".json")
+            add_blob_record("backup", f"repository/{pid}", repo, display_key=disp, source_hint=f"backup/{pid}")
 
     # -------- SageMaker Feature Groups --------
     if services is None or "feature-group" in services or "feature-groups" in services:
@@ -351,11 +366,33 @@ def collect_and_scan(
         if isinstance(m, dict):
             for fg_name, meta in m.items():
                 repo = _api_get(base, use_api_prefix, f"repositories/feature-group/{fg_name}")
-                add_blob_record("feature-group/repository", fg_name, repo, source_hint=f"feature-group/{fg_name}")
-                exp = _api_get(base, use_api_prefix, f"explorer/feature-group/{fg_name}", params={"max_keys": 20})
-                add_blob_record("feature-group/explorer", fg_name, exp, source_hint=f"feature-group/{fg_name}")
+                repo_disp = _display_path("feature-group", "repository", fg_name, ext=".json")
+                add_blob_record("feature-group", f"repository/{fg_name}", repo, display_key=repo_disp, source_hint=f"feature-group/{fg_name}")
 
-    # -------- Glue Databases --------
+                exp = _api_get(base, use_api_prefix, f"explorer/feature-group/{fg_name}", params={"max_keys": 20})
+                items: List[Dict[str, Any]] = []
+                if isinstance(exp, dict):
+                    for k in ("items", "rows", "objects", "features"):
+                        if isinstance(exp.get(k), list):
+                            items = exp[k]
+                            break
+                    if not items:
+                        add_blob_record("feature-group", f"explorer/{fg_name}", exp, source_hint=f"feature-group/{fg_name}", analyze=False)
+                elif isinstance(exp, list):
+                    items = exp
+                else:
+                    add_blob_record("feature-group", f"explorer/{fg_name}", exp, source_hint=f"feature-group/{fg_name}", analyze=False)
+
+                for idx, row in enumerate(items):
+                    leaf = row.get("feature_name") or row.get("name") or str(idx)
+                    dump_key = f"explorer/{fg_name}/{leaf}"
+                    add_blob_record("feature-group", dump_key, row, source_hint=f"feature-group/{fg_name}", analyze=False)
+
+                    disp = _display_path("feature-group", "explorer", fg_name, leaf, ext=".json")
+                    content_text = json.dumps(row, ensure_ascii=False, indent=2)
+                    blobs.append(_make_blob_for_report(disp, content_text, source_hint=f"feature-group/{fg_name}"))
+
+    # ---------------- Glue Databases ----------------
     if services is None or "glue" in services or "glue-databases" in services:
         arr = _api_get(base, use_api_prefix, "glue-databases")
         for it in arr or []:
@@ -363,9 +400,10 @@ def collect_and_scan(
             if not name:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/glue/{name}")
-            add_blob_record("glue/repository", name, repo, source_hint=f"glue/{name}")
+            disp = _display_path("glue", "repository", name, ext=".json")
+            add_blob_record("glue", f"repository/{name}", repo, display_key=disp, source_hint=f"glue/{name}")
 
-    # -------- Kinesis Streams --------
+    # ---------------- Kinesis Streams ----------------
     if services is None or "kinesis" in services or "kinesis-streams" in services:
         arr = _api_get(base, use_api_prefix, "kinesis-streams")
         for it in arr or []:
@@ -373,21 +411,45 @@ def collect_and_scan(
             if not sname:
                 continue
             repo = _api_get(base, use_api_prefix, f"repositories/kinesis/{sname}")
-            add_blob_record("kinesis/repository", sname, repo, source_hint=f"kinesis/{sname}")
-            exp = _api_get(base, use_api_prefix, f"explorer/kinesis/{sname}", params={"limit": 20})
-            add_blob_record("kinesis/explorer", sname, exp, source_hint=f"kinesis/{sname}")
+            repo_disp = _display_path("kinesis", "repository", sname, ext=".json")
+            add_blob_record("kinesis", f"repository/{sname}", repo, display_key=repo_disp, source_hint=f"kinesis/{sname}")
 
-    # JSONL 핸들 닫기 + index.json 작성
+            exp = _api_get(base, use_api_prefix, f"explorer/kinesis/{sname}", params={"limit": 20})
+            items: List[Dict[str, Any]] = []
+            if isinstance(exp, dict):
+                for k in ("records", "Records", "items", "rows"):
+                    if isinstance(exp.get(k), list):
+                        items = exp[k]
+                        break
+                if not items:
+                    add_blob_record("kinesis", f"explorer/{sname}", exp, source_hint=f"kinesis/{sname}", analyze=False)
+            elif isinstance(exp, list):
+                items = exp
+            else:
+                add_blob_record("kinesis", f"explorer/{sname}", exp, source_hint=f"kinesis/{sname}", analyze=False)
+
+            for idx, rec in enumerate(items):
+                leaf = rec.get("sequenceNumber") or rec.get("id") or str(idx)
+                dump_key = f"explorer/{sname}/{leaf}"
+                add_blob_record("kinesis", dump_key, rec, source_hint=f"kinesis/{sname}", analyze=False)
+
+                # 본문
+                content_text = _obj_text_from_common(rec)
+                if content_text is None:
+                    content_text = json.dumps(rec, ensure_ascii=False, indent=2)
+
+                disp = _display_path("kinesis", "explorer", sname, leaf, ext=".json")
+                blobs.append(_make_blob_for_report(disp, content_text, source_hint=f"kinesis/{sname}"))
+
+    # ===================== 마무리 저장/분석 =====================
     if jsonl_fp is not None:
         jsonl_fp.close()
-        index = {
-            "count": len(saved_files),
-            "files": [str(p) for p in saved_files],
-            "jsonl": str(dump_dir / "collected.jsonl"),
-        }
-        (dump_dir / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        (dump_dir / "index.json").write_text(
+            json.dumps({"count": len(saved_files), "files": [str(p) for p in saved_files],
+                        "jsonl": str(dump_dir / "collected.jsonl")}, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
 
-    # === 수집된 blobs를 main.py 파이프라인에 전달 ===
     reports = [analyze_one_blob(b) for b in blobs]
     organize_and_save(reports, out_path)
     return reports, saved_files
