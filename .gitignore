@@ -1,0 +1,16 @@
+# === Python ===
+__pycache__/
+*.pyc
+
+# === Virtual Environment ===
+.venv/
+env/
+venv/
+
+# === Local scripts ===
+for_test.py
+
+# === IDE / OS ===
+.vscode/
+.idea/
+.DS_Store
