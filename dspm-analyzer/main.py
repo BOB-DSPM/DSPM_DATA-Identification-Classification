@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 import os, re, io, csv, json
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 
 # =========================================================
-# Presidio 준비
+# Presidio 준비(선택)
 # =========================================================
 ENGINE_PII_AVAILABLE = False
 try:
@@ -36,7 +36,7 @@ PHONE_RE = re.compile(
     r"(?!\d)"
 )
 
-# ICD-10 (평문 비활성, CSV는 헤더 필요)
+# ICD-10 (헤더 기반 + 평문 의료 문맥에서만)
 ICD10_RE = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9A-TV-Z]{1,4})?)\b", re.I)
 
 # 카드 결제 요소
@@ -46,6 +46,9 @@ CVV_LABEL_RE = re.compile(
     r"(?:CVV|CVC|카드\s*보안코드)(?:\s*\([^)]+\))?\s*[:\-]?\s*([0-9]{3,4})\b",
     re.I
 )
+# CSV 셀형(값만 있는 경우) CVV 후보
+CVV_CSV_CELL_RE = re.compile(r"^\s*\d{3,4}\s*$")
+
 CARD_CONTEXT = (
     "card","visa","master","mastercard","amex","american express",
     "discover","diners","jcb","카드","신용카드","체크카드","카드번호","결제카드","결제","승인","결제번호"
@@ -64,39 +67,46 @@ KOREAN_ADDRESS_RE = re.compile(r"""
 )
 \b
 """, re.VERBOSE)
-BANK_ACCOUNT_RE = re.compile(r"(?<!\d)(?:\d+-)+\d+(?!\d)")
+
+# 계좌: 평문 비활성(헤더 열에서만). 하이픈(일반/긴 대시) 통일 매칭.
+HYPH = r"[-\u2013\u2014\u2015\u2012\u2011\u2010]"
+BANK_ACCOUNT_HYPHEN_RE = re.compile(
+    rf"(?<!\d)(?:\d{{1,4}}{HYPH}\d{{1,6}}(?:{HYPH}\d{{1,6}})+)(?!\d)"
+)
+
 ACCT_CONTEXT = ("계좌","계좌번호","입금","은행","account","acct","iban")
 
 DOB_RES = [
-    re.compile(r"\b(19[0-9]{2}|20[0-9]{2})[-/\.](0[1-9]|1[0-2])[-/\.](0[0-9]|[12][0-9]|3[01])\b"),
+    re.compile(r"\b(19[0-9]{2}|20[0-9]{2})[-/\.](0[1-9]|1[0-2])[-/\.](0[1-9]|[12][0-9]|3[01])\b"),
     re.compile(r"\b(0[1-9]|[12][0-9]|3[01])[-/\.](0[1-9]|1[0-2])[-/\.](19[0-9]{2}|20[0-9]{2})\b"),
     re.compile(r"\b(19[0-9]{2}|20[0-9]{2})년\s*(0?[1-9]|1[0-2])월\s*(0?[0-9]|[12][0-9]|3[01])일\b"),
     re.compile(r"\b([0-9]{2})([01][0-9])([0-3][0-9])\b"),
 ]
 
-# ===== 헤더 힌트 =====
+# ===== 헤더 힌트(동의어 확장) =====
 ICD10_HEADER_HINTS = [
     "icd10","icd_10","diagnosis_code","diagnosis_code_icd10",
-    "icd","dx","diag","진단","진단코드","상병","상병코드"
+    "icd","dx","diag","진단","진단코드","상병","상병코드",
+    "diagnosis","diagnosiscode","icdcode"
 ]
-CARD_NUMBER_HEADER_HINTS = ["card","card_number","pan","acct","account_number"]
-CARD_EXPIRY_HEADER_HINTS  = ["exp","expiry","expiration","exp_date","valid_thru","valid_until"]
-CARD_CVV_HEADER_HINTS     = ["cvv","cvc","cid","csc","security_code"]
+CARD_NUMBER_HEADER_HINTS = ["card","card_number","pan","acct","account_number","cardnumber","card no","cardno"]
+CARD_EXPIRY_HEADER_HINTS  = ["exp","expiry","expiration","exp_date","valid_thru","valid_until","expires"]
+CARD_CVV_HEADER_HINTS     = ["cvv","cvc","cid","csc","security_code","card_cvv","cvv_code"]
 CARD_ISSUER_HEADER_HINTS  = ["card_issuer","issuer","brand","scheme"]
-ADDRESS_HEADER_HINTS      = ["address","주소","배송지","거주지","도로명","지번"]
-BANK_ACCOUNT_HEADER_HINTS = ["bank","bank_account","account_no","acct","계좌","계좌번호","입금"]
+ADDRESS_HEADER_HINTS      = ["address","주소","배송지","거주지","도로명","지번","billing_address","address_road"]
+BANK_ACCOUNT_HEADER_HINTS = [
+    "bank","bank_account","account_no","acct","계좌","계좌번호","입금",
+    "accountnumber","bankaccount","acct_no","accountno"
+]
 DOB_HEADER_HINTS          = ["dob","date_of_birth","dateofbirth","birth","생년월일","출생","출생일"]
+NAME_HEADER_HINTS         = [
+    "name","full_name","first_name","last_name","name_ko","holder_name","cardholder","patient_name",
+    "성명","이름","담당자","작성자","등록자","신청자","수신자","보낸이","받는이","대표","담당","기안자","승인자","검토자"
+]
 ID_HEADER_HINTS_RRN       = ["rrn","resident_registration","주민등록","주민번호","주민등록번호"]
 ID_HEADER_HINTS_FRN       = ["frn","foreigner_registration","외국인등록","외국인등록번호","외국인"]
 ID_HEADER_HINTS_PPT       = ["passport","passport_no","passport_number","여권","여권번호"]
 ID_HEADER_HINTS_DL        = ["driver","driver_license","license_no","dl_number","운전면허","면허번호"]
-
-# 이름 컬럼 힌트 (추가)
-NAME_HEADER_HINTS = [
-    "name","full_name","first_name","last_name",
-    "성명","이름","담당자","작성자","등록자","신청자","수신자","보낸이","받는이",
-    "대표","담당","기안자","승인자","검토자"
-]
 
 # 라우팅 판단용 엔티티
 ID_ENTS = {"KR_RRN","KR_FRN","KR_PASSPORT","KR_DRIVER_LICENSE"}
@@ -154,47 +164,57 @@ def _spans(pattern: re.Pattern, s: str):
 def _overlap(a, b) -> bool:
     return not (a[1] <= b[0] or b[1] <= a[0])
 
-# 전화번호 간이 타당성
 def _is_plausible_kr_phone(raw: str) -> bool:
     d = re.sub(r"\D", "", raw or "")
     if d.startswith("82"):
         d = "0" + d[2:]
-    # 길이 10~11, 0 시작
     if not (len(d) in (10,11) and d.startswith("0")):
         return False
-    # 010 이동통신 또는 02/0[3-6][1-4] 지역 번호
-    if d.startswith("010"):
-        return True
-    if d.startswith("02"):
-        return True
-    if re.match(r"^0[3-6][1-4]", d):
+    if d.startswith("010") or d.startswith("02") or re.match(r"^0[3-6][1-4]", d):
         return True
     return False
 
 def _digits_len(s: str) -> int:
-    return len(re.sub(r"\D", "", s or ""))
+    return len(re.sub(r"\D","", s or ""))
 
-# ===== KR_NAME 후보 추출기 (CSV 이름 컬럼 전용) =====
-NAME_CANDIDATE_RE = re.compile(r"(?:[가-힣]{1}(?:\s|·|-)?[가-힣]{1,2})")
-def _extract_kr_names(value: str) -> List[str]:
-    bad_tail = ("도","시","군","구")  # 전라남도/서울특별시 등 배제
-    out: List[str] = []
-    v = value or ""
-    for m in NAME_CANDIDATE_RE.finditer(v):
-        cand = m.group(0)
-        core = re.sub(r"[·\-\s]", "", cand)
-        if len(core) < 2:
-            continue
-        if core.endswith(bad_tail):
-            continue
-        # 주소 문맥 단서가 강하면 제외
-        if re.search(r"(도로|대로|로|길|번지|호|층|동)", v):
-            continue
-        out.append(cand)
-    return out
+def _norm_header(h: str) -> str:
+    h = (h or "").strip().lower()
+    h = re.sub(r"[\s\-]+", "_", h)
+    h = re.sub(r"[^\w]", "", h)
+    return h
+
+def _hdr_any(header_raw: str, hints: List[str]) -> bool:
+    h_raw = (header_raw or "")
+    h_norm = _norm_header(h_raw)
+    for hint in hints:
+        if hint in h_raw.lower(): return True
+        if hint in h_norm: return True
+        if h_norm == hint: return True
+    return False
+
+def _derive_source_label(key: str) -> Optional[str]:
+    k = (key or "").strip()
+    if not k or "/" not in k:
+        return None
+    parts = k.split("/")
+    if len(parts) < 2:
+        return None
+    svc = parts[0]
+    ident = None
+    if svc == "s3" and len(parts) >= 3:
+        maybe_id = parts[2]
+        ident = maybe_id.rsplit(".", 1)[0]
+    if not ident:
+        for p in reversed(parts[1:]):
+            if p and not p.startswith("_"):
+                ident = p.rsplit(".", 1)[0]
+                break
+    if svc and ident:
+        return f"{svc}/{ident}"
+    return None
 
 # =========================================================
-# 3) CSV 판별(강화 휴리스틱)
+# 3) CSV 판별
 # =========================================================
 def looks_like_csv(text: str) -> bool:
     lines = [ln for ln in text.replace("\r\n","\n").replace("\r","\n").split("\n") if ln.strip()]
@@ -226,18 +246,34 @@ def looks_like_csv(text: str) -> bool:
     return ok >= max(1, len(check_lines) // 2)
 
 # =========================================================
-# 4) 평문 스캔(이메일/전화/카드/주소/계좌/DOB) — ICD-10은 평문 비활성
+# 4) 평문 스캔 — 계좌 평문 비활성, ICD10은 의료 문맥에서만
 # =========================================================
+ICD10_PLAIN_CONTEXT = (
+    "diagnosis","diagnoses","icd","icd-10","icd10","상병","상병코드",
+    "진단","진단코드","환자","의무기록","차트","병력","진료","투약","복약","처방","검사","건강"
+)
+
+def _extract_icd10_in_plain(s: str) -> List[str]:
+    hits: List[str] = []
+    email_spans = _spans(EMAIL_RE, s)
+    for mm in ICD10_RE.finditer(s):
+        code = mm.group(1).upper()
+        span = (mm.start(1), mm.end(1))
+        if any(_overlap(span, e) for e in email_spans):
+            continue
+        ctx = s[max(0, mm.start()-28): min(len(s), mm.end()+28)].lower()
+        if any(k in ctx for k in ICD10_PLAIN_CONTEXT):
+            hits.append(code)
+    return hits
+
 def scan_text_values_all(s: str) -> Dict[str, List[str]]:
     vals: Dict[str, List[str]] = {}
     if not s: return vals
     s = _norm_hyphen(s)
 
-    # 이메일
     for m in EMAIL_RE.finditer(s):
         ensure_list(vals,"EMAIL_ADDRESS"); vals["EMAIL_ADDRESS"].append(m.group(0))
 
-    # 카드 PAN (평문은 결제/카드 문맥 근접 필수)
     for m in CC_CANDIDATE_RE.finditer(s):
         raw = m.group(0)
         if not luhn_valid(raw):
@@ -247,14 +283,12 @@ def scan_text_values_all(s: str) -> Dict[str, List[str]]:
             continue
         ensure_list(vals, "CREDIT_CARD"); vals["CREDIT_CARD"].append(raw)
 
-    # 전화번호(+82/0 접두 필수)
     for m in PHONE_RE.finditer(s):
         cand = m.group(0)
         if not _is_plausible_kr_phone(cand):
             continue
         ensure_list(vals,"PHONE_NUMBER"); vals["PHONE_NUMBER"].append(cand)
 
-    # DOB (컨텍스트 근접)
     DOB_CONTEXT = ("dob","date of birth","date_of_birth","birth","생년월일","출생","출생일")
     for rx in DOB_RES:
         for m in rx.finditer(s):
@@ -262,51 +296,48 @@ def scan_text_values_all(s: str) -> Dict[str, List[str]]:
             if any(k in s[left:right].lower() for k in DOB_CONTEXT):
                 ensure_list(vals,"DATE_OF_BIRTH"); vals["DATE_OF_BIRTH"].append(m.group(0))
 
-    # CVV (라벨형)
     for m in CVV_LABEL_RE.finditer(s):
         ensure_list(vals,"CARD_CVV"); vals["CARD_CVV"].append(m.group(1))
 
-    # 주소
     for m in KOREAN_ADDRESS_RE.finditer(s):
         ensure_list(vals,"KOREAN_ADDRESS"); vals["KOREAN_ADDRESS"].append(m.group(0))
 
-    # 계좌 (문맥 근접 필요)
-    for m in BANK_ACCOUNT_RE.finditer(s):
-        # 숫자 자리수 10~14 보장
-        if not (10 <= _digits_len(m.group(0)) <= 14):
-            continue
-        left = max(0, m.start()-20); right = min(len(s), m.end()+20)
-        if any(k in s[left:right].lower() for k in ACCT_CONTEXT):
-            ensure_list(vals,"KR_BANK_ACCOUNT"); vals["KR_BANK_ACCOUNT"].append(m.group(0))
+    icd_hits = _extract_icd10_in_plain(s)
+    if icd_hits:
+        ensure_list(vals, "ICD10_CODE"); vals["ICD10_CODE"].extend(icd_hits)
 
-    # ICD-10 (평문 활성: 의료 문맥 있을 때만)
-    ICD10_RE = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9A-TV-Z]{1,4})?)\b", re.I)
-
-    # 평문에서 ICD-10 인정할 '의료 문맥' 단어들 (한/영 혼합)
-    ICD10_PLAIN_CONTEXT = (
-        "icd10","icd-10","icd","dx","diagnosis","diag","condition","patient","record","chart",
-        "상병","상병코드","진단","진단코드","질병","의무기록","진료","의학","의료","차트"
-    )
-    return vals  # 중복 그대로 표시
+    # 계좌 평문 비활성
+    return vals
 
 # =========================================================
 # 5) 헤더 기반 스캔 (CSV 셀 단위)
 # =========================================================
+def _looks_like_kr_name(v: str) -> bool:
+    v = (v or "").strip()
+    if not v: return False
+    core = re.sub(r"[·\-\s]", "", v)
+    if not re.fullmatch(r"[가-힣]{2,4}", core):
+        return False
+    if EMAIL_RE.search(v) or re.search(r"(https?://|www\.)", v) or re.search(r"[/\\]\w", v):
+        return False
+    return True
+
 def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
     if value is None:
         return out
 
-    h = (header or "").lower().strip()
+    h_raw = (header or "")
+    h = _norm_header(h_raw)
     v = _norm_hyphen(str(value).strip())
 
-    # 1) 값 자체 기본 스캔(이메일/전화/카드PAN/주소/계좌/DOB/CVV)
+    # 1) 기본 평문 스캔
     base = scan_text_values_all(v)
     for k, arr in base.items():
         ensure_list(out, k); out[k].extend(arr)
 
-    # 2) ICD-10: **헤더 힌트 있을 때만** 인정 + 이메일 겹침/근접 '@' 배제
-    if any(hint in h for hint in ICD10_HEADER_HINTS):
+    # 2) ICD-10: 헤더 힌트가 있을 때만 적극
+    if _hdr_any(h_raw, ICD10_HEADER_HINTS):
         email_spans = _spans(EMAIL_RE, v)
         for mm in ICD10_RE.finditer(v.upper()):
             code = mm.group(1).upper()
@@ -317,22 +348,21 @@ def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
                 continue
             ensure_list(out, "ICD10_CODE"); out["ICD10_CODE"].append(code)
     else:
-        out.pop("ICD10_CODE", None)
+        # 평문 문맥으로 잡힌 것만 유지
+        pass
 
-    # 3) 카드/계좌는 **헤더 열에서만** 인정(상호 충돌 시 계좌 우선)
-    is_card_num_col = any(hint in h for hint in CARD_NUMBER_HEADER_HINTS)
-    is_cvv_col      = any(hint in h for hint in CARD_CVV_HEADER_HINTS)
-    is_exp_col      = any(hint in h for hint in CARD_EXPIRY_HEADER_HINTS)
-    is_bank_col     = any(hint in h for hint in BANK_ACCOUNT_HEADER_HINTS)
+    # 3) 카드/계좌는 헤더 열에서만 인정
+    is_card_num_col = _hdr_any(h_raw, CARD_NUMBER_HEADER_HINTS)
+    is_cvv_col      = _hdr_any(h_raw, CARD_CVV_HEADER_HINTS)
+    is_exp_col      = _hdr_any(h_raw, CARD_EXPIRY_HEADER_HINTS)
+    is_bank_col     = _hdr_any(h_raw, BANK_ACCOUNT_HEADER_HINTS)
 
-    # 카드 PAN
     if is_card_num_col:
         if CC_CANDIDATE_RE.search(v) and luhn_valid(v):
             ensure_list(out, "CREDIT_CARD"); out["CREDIT_CARD"].append(v)
     else:
         out.pop("CREDIT_CARD", None)
 
-    # 카드 유효기간/보안코드
     if is_exp_col:
         m = EXPIRY_RE.search(v)
         if m:
@@ -341,61 +371,56 @@ def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
         out.pop("CARD_EXPIRY", None)
 
     if is_cvv_col:
-        if CVV_RE.fullmatch(v):
-            ensure_list(out, "CARD_CVV"); out["CARD_CVV"].append(v)
-    else:
-        out.pop("CARD_CVV", None)
+        if CVV_CSV_CELL_RE.fullmatch(v):
+            ensure_list(out, "CARD_CVV"); out["CARD_CVV"].append(v.strip())
 
-    # 계좌
     if is_bank_col:
-        m = BANK_ACCOUNT_RE.search(v)
+        m = BANK_ACCOUNT_HYPHEN_RE.search(v)
         if m and (10 <= _digits_len(m.group(0)) <= 14):
             ensure_list(out, "KR_BANK_ACCOUNT"); out["KR_BANK_ACCOUNT"].append(m.group(0))
     else:
         out.pop("KR_BANK_ACCOUNT", None)
 
-    # 충돌 해소: 같은 셀에서 계좌/카드 동시에 걸리면 계좌 우선
     if is_bank_col and "KR_BANK_ACCOUNT" in out and "CREDIT_CARD" in out:
         out.pop("CREDIT_CARD", None)
 
     # 4) 고유식별정보(헤더 기반)
-    if any(hint in h for hint in ID_HEADER_HINTS_RRN):
+    if _hdr_any(h_raw, ID_HEADER_HINTS_RRN):
         for m in re.finditer(r"(?<!\d)(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-]?[1-4]\d{6}(?!\d)", v):
             ensure_list(out, "KR_RRN"); out["KR_RRN"].append(m.group(0))
-    if any(hint in h for hint in ID_HEADER_HINTS_FRN):
+    if _hdr_any(h_raw, ID_HEADER_HINTS_FRN):
         for m in re.finditer(r"(?<!\d)(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-]?[5-8]\d{6}(?!\d)", v):
             ensure_list(out, "KR_FRN"); out["KR_FRN"].append(m.group(0))
-    if any(hint in h for hint in ID_HEADER_HINTS_PPT):
+    if _hdr_any(h_raw, ID_HEADER_HINTS_PPT):
         for m in re.finditer(r"(?<![A-Z0-9])[A-Z]\d{8}(?![A-Z0-9])", v):
             ensure_list(out, "KR_PASSPORT"); out["KR_PASSPORT"].append(m.group(0))
-    if any(hint in h for hint in ID_HEADER_HINTS_DL):
+    if _hdr_any(h_raw, ID_HEADER_HINTS_DL):
         for m in re.finditer(r"(?<!\d)\d{2}-\d{2}-\d{6}-\d{2}(?!\d)", v):
             ensure_list(out, "KR_DRIVER_LICENSE"); out["KR_DRIVER_LICENSE"].append(m.group(0))
 
-    # 5) 주소/DOB: 헤더 힌트 있으면 적극 반영(없으면 base 결과 그대로)
-    if any(hint in h for hint in ADDRESS_HEADER_HINTS):
+    # 5) 주소/DOB/이름: 헤더 힌트 있으면 적극
+    if _hdr_any(h_raw, ADDRESS_HEADER_HINTS):
         m = KOREAN_ADDRESS_RE.search(v)
         if m:
             ensure_list(out, "KOREAN_ADDRESS"); out["KOREAN_ADDRESS"].append(m.group(0))
-    if any(hint in h for hint in DOB_HEADER_HINTS):
+
+    if _hdr_any(h_raw, DOB_HEADER_HINTS):
         for rx in DOB_RES:
             m = rx.search(v)
             if m:
                 ensure_list(out, "DATE_OF_BIRTH"); out["DATE_OF_BIRTH"].append(m.group(0))
                 break
 
-    # 6) 이름 컬럼일 때만 KR_NAME 인식 (CSV 전용 헤더 기반)
-    if any(hint in h for hint in NAME_HEADER_HINTS):
-        names = _extract_kr_names(v)
-        if names:
-            ensure_list(out, "KR_NAME"); out["KR_NAME"].extend(names)
+    if _hdr_any(h_raw, NAME_HEADER_HINTS):
+        if _looks_like_kr_name(v):
+            ensure_list(out, "KR_NAME"); out["KR_NAME"].append(re.sub(r"\s+", "", v))
     else:
         out.pop("KR_NAME", None)
 
-    return out  # 중복 그대로 표시
+    return out
 
 # =========================================================
-# 6) 메타데이터 스캔(파일명 등)
+# 6) 메타데이터 스캔
 # =========================================================
 def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
     key = str(blob.get("key",""))
@@ -421,7 +446,7 @@ def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
         if t in lowered: matched.append(t)
 
     return {
-        "values": vals,  # 그대로
+        "values": vals,
         "risk_hints": {"count": len(matched), "matched": matched}
     }
 
@@ -438,6 +463,7 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
     values: Dict[str, List[str]] = {}
     rows_scanned = 0
     reader = csv.DictReader(io.StringIO(normalized), dialect=dialect)
+
     for row in reader:
         rows_scanned += 1
         for col, raw in (row or {}).items():
@@ -453,7 +479,7 @@ def detect_in_plain_text(text: str) -> Dict[str, Any]:
     return {"values": scan_text_values_all(text)}
 
 # =========================================================
-# 8) Presidio 실행 + 병합
+# 8) Presidio 실행 + 병합(보수적)
 # =========================================================
 def run_presidio(texts: List[str]) -> List[Dict[str,Any]]:
     if not ENGINE_PII_AVAILABLE: return []
@@ -467,10 +493,6 @@ def run_presidio(texts: List[str]) -> List[Dict[str,Any]]:
     return hits
 
 def _merge_presidio_hits_into_findings(findings: Dict[str,Any], hits: List[Dict[str,Any]], *, is_csv: bool = False):
-    """
-    Presidio 결과를 본문 탐지 findigs(dict)에 병합.
-    CSV일 때는 KR_NAME/KR_NAME_ROMA는 헤더 기반으로만 허용 → 병합 스킵.
-    """
     if not hits: return
     tgt = findings.get("values_text") or findings.get("values") or findings.get("json_values")
     if not isinstance(tgt, dict): return
@@ -479,23 +501,17 @@ def _merge_presidio_hits_into_findings(findings: Dict[str,Any], hits: List[Dict[
     for h in hits:
         ent = (h.get("entity") or "").upper()
         txt = h.get("text") or ""
-        if not txt: 
-            continue
+        if not txt: continue
 
-        # CSV 모드에서는 이름 병합 생략(헤더 기반으로만 인정)
-        if is_csv and ent in ("KR_NAME", "KR_NAME_ROMA"):
+        if ent in ("KR_NAME", "KR_NAME_ROMA"):
             continue
-
-        if ent in ("KOREAN_ADDRESS",):
+        if ent == "KOREAN_ADDRESS":
             ensure_list(tgt, "KOREAN_ADDRESS"); tgt["KOREAN_ADDRESS"].append(txt)
-        elif ent in ("KR_BANK_ACCOUNT",):
-            ensure_list(tgt, "KR_BANK_ACCOUNT"); tgt["KR_BANK_ACCOUNT"].append(txt)
+        elif ent == "KR_BANK_ACCOUNT":
+            # 계좌는 헤더 기반에서만: 기본 미병합
+            pass
         elif icd10_rx.match(txt):
             ensure_list(tgt, "ICD10_CODE"); tgt["ICD10_CODE"].append(txt.upper())
-        elif ent == "KR_NAME":
-            ensure_list(tgt, "KR_NAME"); tgt["KR_NAME"].append(txt)
-        elif ent == "KR_NAME_ROMA":
-            ensure_list(tgt, "KR_NAME_ROMA"); tgt["KR_NAME_ROMA"].append(txt)
 
 # =========================================================
 # 9) 분류 로직
@@ -515,7 +531,6 @@ def decide_category(meta: Dict[str,Any],
     hints = (meta.get("risk_hints") or {}).get("matched", [])
     low_hints = [h.lower() for h in hints]
 
-    # --- 카드 데이터 우선 처리 ---
     if "CARD_CVV" in ents:
         return "sensitive", "결제 보안코드(CVV) 포함(PCI-DSS 저장 금지)"
     if ("CREDIT_CARD" in ents) and (("CARD_CVV" in ents) or ("CARD_EXPIRY" in ents)):
@@ -523,15 +538,12 @@ def decide_category(meta: Dict[str,Any],
     if TREAT_CREDIT_CARD_AS_SENSITIVE and "CREDIT_CARD" in ents:
         return "sensitive", "신용카드 포함(정책에 따라 민감으로 격상)"
 
-    # --- 고유식별정보 ---
     if ents & ID_ENTS or any(h in low_hints for h in HINTS_IDENTIFIERS):
         return "identifiers", "고유식별정보 포함"
 
-    # --- 민감정보 ---
     if ents & PIPA_ENTS or any(h in low_hints for h in HINTS_SENSITIVE):
         return "sensitive", "민감정보 포함"
 
-    # --- 일반 PII ---
     if ents & GENERAL_PII or any(h in low_hints for h in HINTS_PII):
         return "public", "일반 개인정보 포함"
 
@@ -544,6 +556,11 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
                        category: str, reason: str) -> str:
     lines = []
     lines.append(f"파일: {key}")
+
+    src = _derive_source_label(key)
+    if src:
+        lines.append(f" ├─ 소스: {src}")
+
     lines.append(f" ├─ 형식: {ctype}")
 
     body_vals = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
@@ -590,11 +607,10 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
             _merge_presidio_hits_into_findings(findings, presidio_hits, is_csv=False)
     elif metrics is not None:
         ctype = "application/json"
-        findings["json_values"] = {}  # 필요시 확장
+        findings["json_values"] = {}
     else:
         ctype = "unknown"
 
-    # 분류
     category, reason = decide_category(meta, findings, presidio_hits)
     console_like = build_console_like(key, ctype, findings, category, reason)
 
@@ -651,7 +667,49 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         target_path.write_text(content_text, encoding="utf-8")
 
 # =========================================================
-# 13) CLI
+# 13) 페이로드 전개(핵심 추가)
+# =========================================================
+def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
+    """
+    blob.content.text 가 JSON(리스트) 형태로, 각 항목이 {key, size, last_modified, content:{text:...}} 구조면
+    내부 항목들을 '가짜 블롭'으로 전개해서 반환. 아니면 None.
+    """
+    try:
+        text = (blob.get("content") or {}).get("text", "")
+        if (not text) or (not text.strip().startswith(("[", "{"))):
+            return _fallback_plain_text_scan(blob)
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            return None
+        children = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                return None
+            if "key" in item and "content" in item:
+                children.append(item)
+            else:
+                return None
+        return children if children else None
+    except Exception:
+        return None
+
+def preprocess_payload(payload: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
+    """
+    입력 리스트를 받아, '본문이 내부 JSON 리스트'인 항목은 내부 key별로 전개하여 반환.
+    그렇지 않은 항목은 그대로 유지.
+    """
+    result: List[Dict[str,Any]] = []
+    for blob in payload:
+        children = _maybe_flatten_embedded_json_text(blob)
+        if children:
+            # 외부 컨테이너(blob)는 건너뛰고, 내부 항목들을 채택
+            result.extend(children)
+        else:
+            result.append(blob)
+    return result
+
+# =========================================================
+# 14) CLI
 # =========================================================
 if __name__ == "__main__":
     import argparse
@@ -683,8 +741,11 @@ if __name__ == "__main__":
     if not isinstance(payload, list):
         raise SystemExit("[!] 입력 JSON은 리스트여야 합니다. (예: [{...}, {...}])")
 
+    # 내부 JSON 리스트 전개
+    worklist = preprocess_payload(payload)
+
     # 분석 실행
-    reports = [analyze_one_blob(b) for b in payload]
+    reports = [analyze_one_blob(b) for b in worklist]
 
     # 저장/출력
     organize_and_save(reports, Path(args.output))
