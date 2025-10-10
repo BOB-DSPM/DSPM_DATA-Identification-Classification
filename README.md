@@ -12,7 +12,7 @@
 
 ---
 
-## 🧠 주요 기능
+## 🧠 개인정보 식별 주요 기능
 
 - **개인정보 탐지 엔진**: 정규식 + 사전(lexicon) + 커스텀 인식기 기반 탐지
 - **법 기준 분류**: 개인정보보호법에 따른 **개인정보 / 민감정보 / 고유식별정보** 자동 분류 및 저장
@@ -95,7 +95,7 @@ python -m spacy download ko_core_news_sm
 
 ---
 
-## ▶️ 사용법
+## ▶️ 개인정보 식별 명령어 사용법
 
 ### 로컬 파일 분석
 ```bash
@@ -111,10 +111,11 @@ python connectors/aws_http/run_collect_and_scan.py --api http://192.168.0.10:800
 ```
 classified/public/
 classified/sensitive/
-classified/identifier/
+classified/identifiers/
 ```
 
 ---
+
 
 ## ⚙️ 환경 변수
 
@@ -126,6 +127,151 @@ classified/identifier/
 
 ---
 
-## 📜 라이선스
 
-MIT License
+## 🧭 server.py 전체 주요 기능 
+
+- Collector 자동 호출 (`/api/collect`)
+- 개인정보 탐지 결과 요약 (`results_front.json`)
+- 리소스 단위 / 민감도 단위별 API 제공
+- 통계(탐지율, 카테고리 분포, 엔티티 순위)
+- CSV / JSONL 내보내기 지원
+
+---
+
+## 🧪 API 테스트 명령어
+
+> FastAPI 서버(`server.py`)가 실행 중이어야 합니다.  
+> Collector(`{COLLECTOR_API}`)는 예시로 `http://192.168.0.10:8000` 을 사용합니다.  
+> 기본 포트는 `9000`입니다.
+
+### API 실행 방법
+
+```bash
+# FastAPI 실행
+uvicorn server:app --host 0.0.0.0 --port 9000
+```
+
+### 수집·분석 실행 (전체 리소스)
+
+```bash
+curl -sS -X POST http://{SERVER_HOST}:9000/api/collect   -H 'Content-Type: application/json'   -d '{
+        "collector_api":"{COLLECTOR_API}",
+        "only_detected":true
+      }' | jq .
+```
+
+✅ 기대 응답:
+```json
+{
+  "ok": true,
+  "returncode": 0,
+  "results_front": "/.../var/results/results_front.json"
+}
+```
+
+### 결과 파일 생성 확인
+
+```bash
+ls -lh var/results/
+stat -c "mtime: %y  size: %s" var/results/results_front.json
+```
+
+### API로 데이터 확인 
+
+```bash
+# 통계/요약
+curl -sS http://{SERVER_HOST}:9000/api/result/front-stats | jq .
+
+# 카테고리 분포
+curl -sS http://{SERVER_HOST}:9000/api/result/category-counts | jq .
+
+# 전체 리스트(무필터)
+curl -sS 'http://{SERVER_HOST}:9000/api/result/front-list?page=1&size=20' | jq .
+
+# 식별된 항목만
+curl -sS 'http://{SERVER_HOST}:9000/api/result/front-list?has_entities=yes&page=1&size=20' | jq .
+
+# 특정 카테고리
+curl -sS 'http://{SERVER_HOST}:9000/api/result/front-category/{CATEGORY}?has_entities=any&page=1&size=20' | jq .
+
+# 특정 리소스
+curl -sS 'http://{SERVER_HOST}:9000/api/result/front-source/{SOURCE}?page=1&size=20' | jq .
+
+# 상세
+RID=$(curl -sS 'http://{SERVER_HOST}:9000/api/result/front-list?page=1&size=1' | jq -r '.items[0].id')
+curl -sS "http://{SERVER_HOST}:9000/api/result/front/${RID}" | jq .
+
+# 내보내기 (CSV/JSONL)
+curl -sS -L -o results_front.csv  'http://{SERVER_HOST}:9000/api/result/front/export?format=csv&has_entities=any'
+curl -sS -L -o results_front.jsonl 'http://{SERVER_HOST}:9000/api/result/front/export?format=jsonl&category=public'
+```
+
+### 리소스(=source) 단위 요약 확인
+
+```bash
+ls -lh var/results/results_front_by_source.json || echo "source 요약 파일 없음"
+curl -sS http://{SERVER_HOST}:9000/api/result/source-summary | jq .
+curl -sS 'http://{SERVER_HOST}:9000/api/result/source/{SOURCE}/entities' | jq .
+```
+
+---
+
+## 🎯 API 구조 요약
+
+| 구분 | 사용 API | 설명 |
+|------|-----------|------|
+| **리소스별 보기** | `/api/result/source-summary`, `/api/result/source/{source}/entities` | 리소스 단위로 개인정보 현황 확인 |
+| **민감도별 보기** | `/api/result/front-category/{category}` | 민감도(public/sensitive/identifiers)별로 구분 |
+| **전체 리스트** | `/api/result/front-list?has_entities=any` | 전체 오브젝트 탐색 |
+| **상세** | `/api/result/front/{id}` | 파일/오브젝트 상세 보기 |
+| **통계/요약** | `/api/result/front-stats` | 탐지율, 분포, 전체 엔티티 순위 |
+| **전체 엔티티 분포** | `front-stats.all_entities` | 모든 엔티티 타입을 많이 나온 순으로 표시 |
+
+---
+
+## 📊 주요 응답 예시
+
+### `/api/result/front-stats`
+
+```json
+{
+  "total_objects": 120,
+  "detected_objects": 35,
+  "detection_rate": 29.1,
+  "category_distribution": {"public":10,"sensitive":3,"identifiers":1,"none":109},
+  "type_distribution": {"text/plain":120,"text/csv":3},
+  "top_entities": [["EMAIL_ADDRESS",40],["PHONE_NUMBER",20]],
+  "all_entities": [
+    ["EMAIL_ADDRESS",40],
+    ["PHONE_NUMBER",20],
+    ["KR_RRN",8],
+    ["ICD10_CODE",5]
+  ]
+}
+```
+
+---
+
+## 🧠 개념 요약
+
+### 🔹 리소스 기반 뷰
+> “어떤 리소스(S3, RDS, ECR 등)에서 개인정보가 나왔는가?”
+
+- `/api/result/source-summary`
+- `/api/result/source/{source}/entities`
+
+### 🔹 민감도 기반 뷰
+> “공개/민감/고유식별 정보 중 어디에 해당하는가?”
+
+- `/api/result/front-category/{category}`
+
+### 🔹 엔티티 기반 뷰
+> “가장 많이 탐지된 개인정보 유형은 무엇인가?”
+
+- `/api/result/front-stats` (`all_entities` 활용)
+
+---
+
+## 🧾 License
+
+© 2025 AEGIS DSPM Project. All rights reserved.
