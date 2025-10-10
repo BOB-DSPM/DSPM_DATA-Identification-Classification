@@ -687,7 +687,7 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
 def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     console_blocks: List[str] = []
 
-    # 콘솔 출력(요약)과 결과 JSON 저장은 유지
+    # 콘솔 출력 + full JSON 저장
     for r in reports:
         body_detected = r.get("body", {}).get("detected", {}) or {}
         if body_detected:
@@ -695,26 +695,26 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
             print(block)
             console_blocks.append(block)
 
-        # === 기존 full 결과 저장 ===
+    out_json_path.parent.mkdir(parents=True, exist_ok=True)
     out_json_path.write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n결과 JSON 저장: {out_json_path.resolve()}")
 
-    # ✅ front용 경량 결과도 따로 저장
+    # ===== Front 전용 결과(results_front.json) 생성 =====
     front_reports = []
     for r in reports:
         file = r.get("file")
-        findings = r.get("body", {}).get("detected", {})
+        findings = r.get("body", {}).get("detected", {}) or {}
         category = r.get("classification", {}).get("category")
         reason = r.get("classification", {}).get("reason")
         saved_paths = r.get("classification", {}).get("saved_paths", {})
         front_reports.append({
             "file": file,
-            "source": _derive_source_label(file),  
+            "source": _derive_source_label(file),
             "type": r.get("type"),
             "category": category,
             "reason": reason,
-            "risk_hints": r.get("metadata", {}).get("risk_hints", {}), 
-            "stats": {                                         
+            "risk_hints": r.get("metadata", {}).get("risk_hints", {}),
+            "stats": {
                 "rows_scanned": r.get("body", {}).get("rows_scanned"),
                 "total_entities": len(findings or {}),
                 "unique_entity_types": list((findings or {}).keys())
@@ -729,39 +729,31 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 for ent, vals in findings.items()
             }
         })
-    front_path = out_json_path.parent / "results_front.json"
+    base_dir = out_json_path.parent
+    front_path = base_dir / "results_front.json"
     front_path.write_text(json.dumps(front_reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Front 결과 저장: {front_path.resolve()}")
 
-    # 콘솔 사본 파일 저장
-    console_path = out_json_path.parent / "results.console.txt"
+    # 콘솔 사본
+    console_path = base_dir / "results.console.txt"
     if console_blocks:
         console_path.write_text("\n".join(console_blocks) + "\n", encoding="utf-8")
     else:
         console_path.write_text("# 본문 탐지 결과가 있는 항목이 없어 콘솔 출력이 없습니다.\n", encoding="utf-8")
     print(f"콘솔 출력 사본 저장: {console_path.resolve()}")
 
-    # === 저장 로직: 엔티티별로만 저장 ===
-    base_dir = out_json_path.parent
-
+    # ===== 엔티티별 텍스트 저장 (파일 단위) =====
     for r in reports:
         body_detected: Dict[str, List[str]] = r.get("body", {}).get("detected", {}) or {}
         if not body_detected:
             continue
 
-        # 원본 키를 파일명으로 안전하게 변환
-        safe_key = re.sub(r"[<>:\"\\|?*]", "", r.get("file", "unknown"))
-        safe_key = safe_key.strip().replace("..", ".")
-        safe_key = safe_key.strip("/")
-
-        # 각 엔티티를 PIPA 버킷 규칙(public / sensitive / identifiers)으로 나눠 저장
+        safe_key = re.sub(r"[<>:\"\\|?*]", "", r.get("file", "unknown")).strip().replace("..", ".").strip("/")
         for ent, vals in body_detected.items():
-            if not vals:
-                continue
+            if not vals: continue
             bucket = _bucket_for_entity(ent)  # public / sensitive / identifiers
             per_ent_path = base_dir / CLASSIFY_ROOT / bucket / f"{safe_key}__{ent}.txt"
             per_ent_path.parent.mkdir(parents=True, exist_ok=True)
-
             per_ent_content = [
                 f"# Original key: {r['file']}",
                 f"# Type: {r['type']}",
@@ -769,8 +761,66 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 "",
                 "## Values",
             ] + [str(v) for v in vals]
-
             per_ent_path.write_text("\n".join(per_ent_content) + "\n", encoding="utf-8")
+
+    # ===== 리소스(source) 단위 롤업 인덱스/아카이브 =====
+    # source 라벨 = _derive_source_label(file)
+    by_source: Dict[str, Dict[str, Any]] = {}
+    for r in reports:
+        src_label = _derive_source_label(r.get("file","")) or "unknown"
+        body = r.get("body", {}).get("detected", {}) or {}
+        cat = (r.get("classification", {}) or {}).get("category", "none")
+
+        rec = by_source.setdefault(src_label, {
+            "files": set(),
+            "category_counts": {},
+            "entities": {}  # ent -> {"bucket":..., "values": set()}
+        })
+        rec["files"].add(r.get("file",""))
+        rec["category_counts"][cat] = rec["category_counts"].get(cat, 0) + 1
+
+        for ent, vals in body.items():
+            if not vals: continue
+            entrec = rec["entities"].setdefault(ent, {"bucket": _bucket_for_entity(ent), "values": set()})
+            for v in vals:
+                try:
+                    entrec["values"].add(str(v))
+                except Exception:
+                    pass
+
+    # 인덱스 JSON (프론트 source-summary용)
+    rollup = []
+    for src, rec in by_source.items():
+        ent_out = {}
+        for ent, e in rec["entities"].items():
+            ent_out[ent] = {
+                "bucket": e["bucket"],
+                "count": len(e["values"]),
+                "unique_values": len(e["values"])
+            }
+        rollup.append({
+            "source": src,
+            "total_files": len(rec["files"]),
+            "category_counts": rec["category_counts"],
+            "entities": ent_out
+        })
+    by_source_path = base_dir / "results_front_by_source.json"
+    by_source_path.write_text(json.dumps(rollup, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"리소스 요약 저장: {by_source_path.resolve()}")
+
+    # (선택) 리소스별 통합 텍스트 아카이브
+    for src, rec in by_source.items():
+        safe_src = re.sub(r"[^\w\-\.]+", "_", src or "unknown")
+        for ent, e in rec["entities"].items():
+            bucket = e["bucket"]
+            out_dir = base_dir / "classified_by_source" / safe_src / bucket
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_file = out_dir / f"__ALL__{safe_src}__{ent}.txt"
+            try:
+                out_file.write_text("\n".join(sorted(e["values"])) + "\n", encoding="utf-8")
+            except Exception:
+                # 값에 특수문자가 너무 많아 실패해도 전체 파이프라인은 이어가자
+                pass
 
 # =========================================================
 # 13) 페이로드 전개(핵심 추가)
