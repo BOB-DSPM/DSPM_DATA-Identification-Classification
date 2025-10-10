@@ -274,4 +274,4 @@ curl -sS 'http://{SERVER_HOST}:9000/api/result/source/{SOURCE}/entities' | jq .
 
 ## 🧾 License
 
-© 2025 AEGIS DSPM Project. All rights reserved.
+© 2025 AEGIS DSPM Project. All rights reserved. 
