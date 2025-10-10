@@ -598,9 +598,6 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
     else:
         lines.append(" ├─ 본문 탐지: 없음")
 
-    # 파일 전체 카테고리(최고등급) 표시는 유지
-    lines.append(f" ├─ 분류: {category} ({reason})")
-
     # 엔티티별 저장 경로 표시
     if body_vals:
         safe_key = _safe_key_filename(key)
@@ -819,11 +816,10 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
             try:
                 out_file.write_text("\n".join(sorted(e["values"])) + "\n", encoding="utf-8")
             except Exception:
-                # 값에 특수문자가 너무 많아 실패해도 전체 파이프라인은 이어가자
                 pass
 
 # =========================================================
-# 13) 페이로드 전개(핵심 추가)
+# 13) 페이로드 전개
 # =========================================================
 def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
     try:
@@ -910,4 +906,4 @@ if __name__ == "__main__":
     reports = [analyze_one_blob(b) for b in worklist]
 
     # 저장/출력
-    organize_and_save(reports, Path(args.output))
+    organize_and_save(reports, Path(args.output))  
