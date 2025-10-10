@@ -158,14 +158,16 @@ class FrontStore:
             for k, v in it.entities.items():
                 ent_counts[k] = ent_counts.get(k, 0) + int(v.count or 0)
         rate = round((detected_objs/total)*100, 2) if total else 0.0
-        top = sorted(ent_counts.items(), key=lambda x:x[1], reverse=True)[:5]
+        sorted_entities = sorted(ent_counts.items(), key=lambda x: x[1], reverse=True)
+        top = sorted_entities[:5]
         return {
             "total_objects": total,
             "detected_objects": detected_objs,
             "detection_rate": rate,
+            "top_entities": top,
+            "all_entities": sorted_entities,   
             "category_distribution": cat_dist,
             "type_distribution": type_dist,
-            "top_entities": top,
         }
 
     def category_counts(self) -> CategoryCountsResponse:
