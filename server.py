@@ -5,13 +5,13 @@
 # - collector 트리거는 var/results/results_all.json 으로 고정, 그 옆에 results_front.json 생성됨
 # - 기본=전체 리소스: services 미지정([]) 또는 ["all"] / ["*"] 이면 --services 전달 안함
 
-import os, io, csv, json, hashlib, subprocess, sys
+import os, io, csv, json, hashlib, subprocess, sys, tarfile, tempfile, shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
 from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ CONNECTOR_SCRIPT = Path(os.getenv(
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="AEGIS Analyzer API (front-only)", version="3.1.0")
+app = FastAPI(title="AEGIS Analyzer API (front-only)", version="3.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
@@ -41,6 +41,23 @@ app.add_middleware(
 
 def _sha12(s: str) -> str:
     return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:12]
+
+# ─────────────────────────────────────────────────────────────
+# Manifest / Tree helpers
+# ─────────────────────────────────────────────────────────────
+def _manifest_recursive(base: Path) -> List[str]:
+    return sorted(str(p.resolve()) for p in base.rglob("*") if p.is_file())
+
+def _tree_node(p: Path) -> Dict[str, Any]:
+    if p.is_dir():
+        return {
+            "type": "dir",
+            "name": p.name,
+            "children": [
+                _tree_node(c) for c in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+            ],
+        }
+    return {"type": "file", "name": p.name, "size": p.stat().st_size, "path": str(p.resolve())}
 
 # ─────────────────────────────────────────────────────────────
 # Models
@@ -83,11 +100,6 @@ class _CollectBody(BaseModel):
     services: List[str] = Field(default_factory=list)  # [] or ["all"] → 전체
     only_detected: bool = False
     extra_args: List[str] = Field(default_factory=list)
-
-class CollectResponse(BaseModel):
-    ok: bool
-    returncode: int
-    results_front: str
 
 # ─────────────────────────────────────────────────────────────
 # Store (front-only)
@@ -142,7 +154,7 @@ class FrontStore:
 
     def ensure(self): self._load()
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self, *, include_top: bool = False, include_type: bool = False) -> Dict[str, Any]:
         self.ensure()
         total = len(self.items)
         detected_objs = 0
@@ -154,21 +166,25 @@ class FrontStore:
             cat = (it.category or "none").lower()
             typ = (it.type or "unknown").lower()
             cat_dist[cat]  = cat_dist.get(cat, 0) + 1
-            type_dist[typ] = type_dist.get(typ, 0) + 1
+            if include_type:
+                type_dist[typ] = type_dist.get(typ, 0) + 1
             for k, v in it.entities.items():
                 ent_counts[k] = ent_counts.get(k, 0) + int(v.count or 0)
         rate = round((detected_objs/total)*100, 2) if total else 0.0
         sorted_entities = sorted(ent_counts.items(), key=lambda x: x[1], reverse=True)
-        top = sorted_entities[:5]
-        return {
+
+        out = {
             "total_objects": total,
             "detected_objects": detected_objs,
             "detection_rate": rate,
-            "top_entities": top,
-            "all_entities": sorted_entities,   
+            "all_entities": sorted_entities,
             "category_distribution": cat_dist,
-            "type_distribution": type_dist,
         }
+        if include_top:
+            out["top_entities"] = sorted_entities[:5]
+        if include_type:
+            out["type_distribution"] = type_dist
+        return out
 
     def category_counts(self) -> CategoryCountsResponse:
         self.ensure()
@@ -207,20 +223,48 @@ class FrontStore:
             out.append(it)
         return out
 
+    # 런타임 source 요약 (results_front_by_source.json 없을 때 fallback)
+    def summarize_by_source_runtime(self) -> List[Dict[str, Any]]:
+        self.ensure()
+        acc: Dict[str, Dict[str, Any]] = {}
+        for it in self.items:
+            src = it.source or "unknown"
+            row = acc.setdefault(src, {
+                "source": src,
+                "object_count": 0,
+                "detected_count": 0,
+                "categories": {},
+                "entities": {},
+            })
+            row["object_count"] += 1
+            if it.entities:
+                row["detected_count"] += 1
+            cat = (it.category or "none").lower()
+            row["categories"][cat] = row["categories"].get(cat, 0) + 1
+            for k, v in it.entities.items():
+                row["entities"][k] = row["entities"].get(k, 0) + int(v.count or 0)
+        # 비율 계산
+        for row in acc.values():
+            oc = row["object_count"] or 0
+            dc = row["detected_count"] or 0
+            row["detection_rate"] = round((dc / oc) * 100, 2) if oc else 0.0
+        return list(acc.values())
+
 front_store = FrontStore(RESULTS_FRONT_JSON)
 
 # ─────────────────────────────────────────────────────────────
 # Endpoints — 파일 단위
 # ─────────────────────────────────────────────────────────────
 @app.get("/api/result/front-stats")
-def front_stats():
-    return front_store.stats()
+def front_stats(include_top: Optional[str] = None, include_type: Optional[str] = None):
+    def as_bool(x: Optional[str]) -> bool:
+        return str(x).lower() in ("1", "true", "yes", "y")
+    return front_store.stats(include_top=as_bool(include_top), include_type=as_bool(include_type))
 
 @app.get("/api/result/category-counts", response_model=CategoryCountsResponse)
 def category_counts():
     return front_store.category_counts()
 
-# (호환용) 과거 이름 유지
 @app.get("/api/result/categories", response_model=CategoryCountsResponse)
 def categories_alias():
     return front_store.category_counts()
@@ -259,7 +303,7 @@ def front_category(
     total=len(rows); start=(page-1)*size; end=start+size
     return ListResponse(total=total, page=page, size=size, items=rows[start:end])
 
-@app.get("/api/result/front-source/{source}", response_model=ListResponse)
+@app.get("/api/result/front-source/{source:path}", response_model=ListResponse)
 def front_source(
     source: str,
     page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=200),
@@ -324,61 +368,110 @@ def front_export(
         headers={"Content-Disposition":"attachment; filename=results_front.csv"})
 
 # ─────────────────────────────────────────────────────────────
-# Endpoints — 리소스(source) 단위 요약 (organize_and_save가 만들어 주는 인덱스 사용)
+# Endpoints — 리소스(source) 단위 요약
 # ─────────────────────────────────────────────────────────────
 @app.get("/api/result/source-summary")
 def source_summary():
-    if not RESULTS_SOURCE_SUM.exists():
-        return {"items": []}
-    data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
-    return {"items": data}
+    if RESULTS_SOURCE_SUM.exists():
+        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
+        return {"items": data}
+    # fallback (파일이 없으면 런타임 집계)
+    return {"items": front_store.summarize_by_source_runtime()}
 
-@app.get("/api/result/source/{source}/entities")
+@app.get("/api/result/source/{source:path}/entities")
 def source_entities(source: str):
-    if not RESULTS_SOURCE_SUM.exists():
-        raise HTTPException(404, "source summary not found")
-    data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
-    for row in data:
+    # 파일 기반 우선
+    if RESULTS_SOURCE_SUM.exists():
+        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
+        for row in data:
+            if row.get("source") == source:
+                return row
+    # 런타임 집계 fallback
+    for row in front_store.summarize_by_source_runtime():
         if row.get("source") == source:
             return row
     raise HTTPException(status_code=404, detail="source not found")
 
 # ─────────────────────────────────────────────────────────────
+# Manifest / Tree / Archive endpoints 
+# ─────────────────────────────────────────────────────────────
+@app.get("/api/result/manifest")
+def result_manifest():
+    return {
+        "dir": str(RESULTS_DIR.resolve()),
+        "files": _manifest_recursive(RESULTS_DIR),
+    }
+
+@app.get("/api/result/tree")
+def result_tree():
+    return _tree_node(RESULTS_DIR)
+
+@app.get("/api/result/archive")
+def result_archive(fmt: Literal["zip","tar.gz"]="zip"):
+    base = RESULTS_DIR
+    if fmt == "zip":
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip"); tmp.close()
+        shutil.make_archive(tmp.name[:-4], "zip", root_dir=base.parent, base_dir=base.name)
+        return FileResponse(tmp.name, media_type="application/zip", filename="results.zip")
+    else:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz"); tmp.close()
+        with tarfile.open(tmp.name, "w:gz") as tar:
+            tar.add(str(base), arcname=base.name)
+        return FileResponse(tmp.name, media_type="application/gzip", filename="results.tar.gz")
+
+# ─────────────────────────────────────────────────────────────
 # Collector trigger — 결과 폴더 고정(var/results)
 # ─────────────────────────────────────────────────────────────
-@app.post("/api/collect", response_model=CollectResponse)
+@app.post("/api/collect")
 def trigger_collect(req: _CollectBody = Body(...)):
     if not CONNECTOR_SCRIPT.exists():
         raise HTTPException(500, f"Connector script not found: {CONNECTOR_SCRIPT}")
 
-    out_path = RESULTS_ALL_JSON  # 고정: var/results/results_all.json
+    if not (req.collector_api and req.collector_api.startswith(("http://","https://"))):
+        raise HTTPException(400, "collector_api must start with http:// or https://")
+
+    out_path = RESULTS_ALL_JSON
     env = os.environ.copy()
     if req.only_detected:
         env["ONLY_DETECTED"] = "1"
 
     cmd = [sys.executable, str(CONNECTOR_SCRIPT), "--api", req.collector_api, "--out", str(out_path)]
 
-    # 기본=전체 → services 미지정([]) 또는 ["all"] / ["*"] 이면 --services 생략
     sv = [s.lower() for s in (req.services or [])]
     is_all = (not sv) or (sv == ["all"]) or (sv == ["*"])
     if not is_all:
+        # run_collect_and_scan.py 는 '--services'에 "콤마로 연결된 문자열" 하나를 기대함
         cmd += ["--services", ",".join(req.services)]
 
     if req.extra_args:
         cmd += req.extra_args
 
-    subprocess.run(cmd, cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+    proc = subprocess.run(
+        cmd, cwd=str(ROOT), env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
 
-    # organize_and_save()가 out 옆에 results_front.json / results_front_by_source.json 생성
-    # 일부 레거시 경로로 생성되었을 경우 대비(선택적 보호)
+    # organize_and_save()가 만든 results_front.json이 dspm-analyzer/ 밑에 생성된 경우 보정
     legacy_front = ROOT / "dspm-analyzer" / "results_front.json"
     if not RESULTS_FRONT_JSON.exists() and legacy_front.exists():
         RESULTS_FRONT_JSON.write_text(legacy_front.read_text(encoding="utf-8"), encoding="utf-8")
 
     # 리로드
-    front_store.mtime = 0.0; front_store.ensure()
+    front_store.mtime = 0.0
+    front_store.ensure()
 
-    return CollectResponse(ok=True, returncode=0, results_front=str(RESULTS_FRONT_JSON.resolve()))
+    manifest = _manifest_recursive(RESULTS_DIR)
+    ok = (proc.returncode == 0) and RESULTS_FRONT_JSON.exists()
+    return {
+        "ok": ok,
+        "returncode": proc.returncode,
+        "cmd": cmd,
+        "results_front": str(RESULTS_FRONT_JSON.resolve()),
+        "results_manifest": manifest,
+        "results_dir": str(RESULTS_DIR.resolve()),
+        "stdout": proc.stdout[-4000:],
+        "stderr": proc.stderr[-4000:],
+    }
 
 # 수동 리로드(디버그용)
 @app.post("/api/result/reload")
