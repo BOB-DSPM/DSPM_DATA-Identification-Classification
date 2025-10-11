@@ -122,6 +122,50 @@ class FrontStore:
         self.mtime = 0.0
         self.items: List[FrontItem] = []
 
+    def summarize_by_source_runtime(self) -> List[Dict[str, Any]]:
+        """
+        results_front.json 로드된 self.items를 기반으로
+        source 별 엔티티 집계를 런타임으로 계산한다.
+        """
+        self.ensure()
+        acc: Dict[str, Dict[str, int]] = {}
+        counts_by_category: Dict[str, Dict[str, int]] = {}
+
+        for it in self.items:
+            src = it.source or ""
+            if src not in acc:
+                acc[src] = {}
+                counts_by_category[src] = {"public": 0, "sensitive": 0, "identifiers": 0, "none": 0}
+
+            # 엔티티 합계
+            for ent, info in (it.entities or {}).items():
+                acc[src][ent] = acc[src].get(ent, 0) + int(info.count or 0)
+
+            # 카테고리 건수
+            cat = (it.category or "none").lower()
+            if cat not in counts_by_category[src]:
+                counts_by_category[src][cat] = 0
+            counts_by_category[src][cat] += 1
+
+        # 결과 정리
+        out: List[Dict[str, Any]] = []
+        for src, ents in acc.items():
+            total_entities = sum(ents.values())
+            top_entities = sorted(ents.items(), key=lambda x: x[1], reverse=True)[:5]
+            row = {
+                "source": src,
+                "total_objects": sum(counts_by_category[src].values()),
+                "category_distribution": counts_by_category[src],
+                "total_entities": total_entities,
+                "top_entities": top_entities,
+                "all_entities": sorted(ents.items(), key=lambda x: x[1], reverse=True),
+            }
+            out.append(row)
+
+        # source 이름 정렬
+        out.sort(key=lambda r: r["source"])
+        return out
+
     def _normalize(self, raw: Dict[str, Any]) -> FrontItem:
         file = raw.get("file") or raw.get("path") or ""
         src = raw.get("source")
@@ -166,33 +210,43 @@ class FrontStore:
 
     def ensure(self): self._load()
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self, *, include_top: bool = True, include_type: bool = True) -> Dict[str, Any]:
         self.ensure()
         total = len(self.items)
         detected_objs = 0
         cat_dist: Dict[str, int] = {}
         type_dist: Dict[str, int] = {}
         ent_counts: Dict[str, int] = {}
+
         for it in self.items:
-            if it.entities: detected_objs += 1
+            if it.entities:
+                detected_objs += 1
             cat = (it.category or "none").lower()
-            typ = (it.type or "unknown").lower()
-            cat_dist[cat]  = cat_dist.get(cat, 0) + 1
-            type_dist[typ] = type_dist.get(typ, 0) + 1
+            cat_dist[cat] = cat_dist.get(cat, 0) + 1
+
+            if include_type:
+                typ = (it.type or "unknown").lower()
+                type_dist[typ] = type_dist.get(typ, 0) + 1
+
             for k, v in it.entities.items():
                 ent_counts[k] = ent_counts.get(k, 0) + int(v.count or 0)
-        rate = round((detected_objs/total)*100, 2) if total else 0.0
+
+        rate = round((detected_objs / total) * 100, 2) if total else 0.0
         sorted_entities = sorted(ent_counts.items(), key=lambda x: x[1], reverse=True)
-        top = sorted_entities[:5]
-        return {
+
+        out = {
             "total_objects": total,
             "detected_objects": detected_objs,
             "detection_rate": rate,
-            "top_entities": top,
-            "all_entities": sorted_entities,
             "category_distribution": cat_dist,
-            "type_distribution": type_dist,
         }
+        if include_type:
+            out["type_distribution"] = type_dist
+        if include_top:
+            out["top_entities"] = sorted_entities[:5]
+        # 항상 all_entities 포함시키고 싶으면 아래 줄 유지, 빼고 싶으면 조건 넣으세요.
+        out["all_entities"] = sorted_entities
+        return out
 
     def category_counts(self) -> CategoryCountsResponse:
         self.ensure()
@@ -296,40 +350,10 @@ def front_source(
     has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
     file_prefix: Optional[str] = None,
 ):
-    rows = front_store.query(q=q, category=category, type_=type, entity=entity, has_entities=has_entities,
-                             source=source, file_prefix=file_prefix)
+    rows = front_store.query(q=q, category=category, type_=type, entity=entity,
+                             has_entities=has_entities, source=source, file_prefix=file_prefix)
     total=len(rows); start=(page-1)*size; end=start+size
     return ListResponse(total=total, page=page, size=size, items=rows[start:end])
-
-@app.get("/api/result/front/{rid}", response_model=FrontItem)
-def front_get(rid: str):
-    front_store.ensure()
-    for it in front_store.items:
-        if it.id == rid: return it
-    raise HTTPException(status_code=404, detail="Front result not found")
-
-@app.get("/api/result/front/export")
-def front_export(
-    format: Literal["csv","jsonl"] = Query("csv"),
-    q: Optional[str] = None,
-    category: Optional[str] = None,
-    type: Optional[str] = Query(None, alias="type"),
-    entity: Optional[str] = None,
-    has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
-    source: Optional[str] = None,
-    source_prefix: Optional[str] = None,
-    file_prefix: Optional[str] = None,
-):
-    rows = front_store.query(q=q, category=category, type_=type, entity=entity, has_entities=has_entities,
-                             source=source, source_prefix=source_prefix, file_prefix=file_prefix)
-
-    if format == "jsonl":
-        def gen_jsonl():
-            for it in rows:
-                yield json.dumps(it.dict(), ensure_ascii=False) + "\n"
-        return StreamingResponse(gen_jsonl(),
-            media_type="application/x-jsonlines",
-            headers={"Content-Disposition":"attachment; filename=results_front.jsonl"})
 
     def gen_csv():
         buf=io.StringIO(); w=csv.writer(buf)
@@ -349,6 +373,13 @@ def front_export(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition":"attachment; filename=results_front.csv"})
 
+@app.get("/api/result/front/{rid}", response_model=FrontItem)
+def front_get(rid: str):
+    front_store.ensure()
+    for it in front_store.items:
+        if it.id == rid: return it
+    raise HTTPException(status_code=404, detail="Front result not found")
+
 # ─────────────────────────────────────────────────────────────
 # Endpoints — 리소스(source) 단위 요약 (organize_and_save가 만들어 주는 인덱스 사용)
 # ─────────────────────────────────────────────────────────────
@@ -360,15 +391,18 @@ def source_summary():
     # fallback (파일이 없으면 런타임 집계.)
     return {"items": front_store.summarize_by_source_runtime()}
 
-@app.get("/api/result/source/{source}/entities")
-def source_entities(source: str):
-    if not RESULTS_SOURCE_SUM.exists():
-        raise HTTPException(404, "source summary not found")
-    data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
-    for row in data:
-        if row.get("source") == source:
-            return row
-    raise HTTPException(status_code=404, detail="source not found")
+# @app.get("/api/result/source/{source:path}/entities")
+#def source_entities(source: str):
+#    if RESULTS_SOURCE_SUM.exists():
+#        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
+#        for row in data:
+#            if row.get("source") == source:
+#                return row
+    # 폴백 추가 (파일 없어도 런타임 요약 제공)
+#    for row in front_store.summarize_by_source_runtime():
+#        if row.get("source") == source:
+#            return row
+#    raise HTTPException(status_code=404, detail="source not found")
 
 # ─────────────────────────────────────────────────────────────
 # Manifest / Tree / Archive endpoints 
@@ -419,8 +453,7 @@ def trigger_collect(req: _CollectBody = Body(...)):
     sv = [s.lower() for s in (req.services or [])]
     is_all = (not sv) or (sv == ["all"]) or (sv == ["*"])
     if not is_all:
-        # 쉼표로 합치지 말고, 인자 확장으로 전달
-        cmd += ["--services", *req.services]
+        cmd += ["--services", ",".join(req.services)]
 
     if req.extra_args:
         cmd += req.extra_args
@@ -460,3 +493,75 @@ def trigger_collect(req: _CollectBody = Body(...)):
 def reload_front():
     front_store.mtime = 0.0; front_store.ensure()
     return {"ok": True, "count": len(front_store.items), "path": str(RESULTS_FRONT_JSON)}
+
+@app.get("/api/result/source/entities")
+def source_entities_qs(source: str):
+    if RESULTS_SOURCE_SUM.exists():
+        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
+        for row in data:
+            if row.get("source") == source:
+                return row
+    # 파일이 없어도 런타임으로 제공
+    for row in front_store.summarize_by_source_runtime():
+        if row.get("source") == source:
+            return row
+    raise HTTPException(status_code=404, detail="source not found")
+
+# @app.get("/api/result/front-source", response_model=ListResponse)
+# def front_source_qs(
+#    source: str,
+#    page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=200),
+#    q: Optional[str] = None,
+#    category: Optional[str] = None,
+#    type: Optional[str] = Query(None, alias="type"),
+#    entity: Optional[str] = None,
+#    has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
+#    file_prefix: Optional[str] = None,
+#):
+#    rows = front_store.query(q=q, category=category, type_=type, entity=entity,
+#                             has_entities=has_entities, source=source, file_prefix=file_prefix)
+#    total=len(rows); start=(page-1)*size; end=start+size
+#    return ListResponse(total=total, page=page, size=size, items=rows[start:end])
+
+@app.get("/api/result/export")
+def front_export_alias(
+    format: Literal["csv","jsonl"] = Query("csv"),
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    type: Optional[str] = Query(None, alias="type"),
+    entity: Optional[str] = None,
+    has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
+    source: Optional[str] = None,
+    source_prefix: Optional[str] = None,
+    file_prefix: Optional[str] = None,
+):
+    # 기존 front_export와 동일 동작
+    rows = front_store.query(q=q, category=category, type_=type, entity=entity,
+                             has_entities=has_entities, source=source,
+                             source_prefix=source_prefix, file_prefix=file_prefix)
+
+    if format == "jsonl":
+        def gen_jsonl():
+            for it in rows:
+                yield json.dumps(it.dict(), ensure_ascii=False) + "\n"
+        return StreamingResponse(gen_jsonl(),
+            media_type="application/x-jsonlines",
+            headers={"Content-Disposition":"attachment; filename=results_front.jsonl"})
+
+    def gen_csv():
+        buf=io.StringIO(); w=csv.writer(buf)
+        w.writerow(["id","file","source","type","category","reason","risk_hints",
+                    "stats.rows_scanned","stats.total_entities","stats.unique_entity_types","entities(json)"])
+        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+        for it in rows:
+            w.writerow([
+                it.id, it.file, it.source or "", it.type or "", it.category or "", it.reason or "",
+                json.dumps(it.risk_hints, ensure_ascii=False),
+                it.stats.rows_scanned or "", it.stats.total_entities or "",
+                json.dumps(it.stats.unique_entity_types, ensure_ascii=False),
+                json.dumps({k:v.dict() for k,v in it.entities.items()}, ensure_ascii=False),
+            ])
+            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+    return StreamingResponse(gen_csv(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":"attachment; filename=results_front.csv"})
