@@ -189,6 +189,27 @@ def _hdr_any(header_raw: str, hints: List[str]) -> bool:
         if h_norm == hint: return True
     return False
 
+_TOKEN_SPLIT_RE = re.compile(r"[^\w@.+-]+", re.UNICODE)
+
+def _filename_tokens(key: str) -> List[str]:
+    """
+    파일 경로에서 파일명(basename)과 마지막 2~3개 디렉터리명을 추려
+    토큰 단위로 분해하여 반환.
+    - 이메일/도메인/연월일/ID 등이 토큰으로 남도록 @ . + - 는 유지
+    - 너무 긴 숫자 나열은 scan_text_values_all의 필터(카드/전화/생년월일 문맥)에서 걸러짐
+    """
+    if not key:
+        return []
+    parts = [p for p in key.strip("/").split("/") if p]
+    tail = parts[-3:] if len(parts) >= 3 else parts  # 마지막 3개 세그먼트만
+    toks: List[str] = []
+    for seg in tail:
+        for t in _TOKEN_SPLIT_RE.split(seg):
+            if t:
+                toks.append(t)
+    # 중복 제거(순서 유지)
+    return list(dict.fromkeys(toks))
+
 def _derive_source_label(key: str) -> Optional[str]:
     k = (key or "").strip()
     if not k or "/" not in k:
@@ -423,11 +444,13 @@ def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
     key = str(blob.get("key",""))
     vals: Dict[str, List[str]] = {}
 
+    # 기존: key/last_modified/size 문자열에서 평문 패턴 스캔(과도탐지 거의 없음)
     for field in ("key","last_modified","size"):
         found = scan_text_values_all(str(blob.get(field,"")))
         for k, arr in found.items():
             ensure_list(vals,k); vals[k].extend(arr)
 
+    # 기존: metadata/tags/labels 딕셔너리 키/값도 스캔
     for field in ("metadata","tags","labels"):
         md = blob.get(field)
         if isinstance(md, dict):
@@ -437,15 +460,24 @@ def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
                 for k, arr in scan_text_values_all(str(mv)).items():
                     ensure_list(vals,k); vals[k].extend(arr)
 
-    matched = []
-    lowered = key.lower()
-    for t in set(HINTS_SENSITIVE + HINTS_IDENTIFIERS + HINTS_PII):
-        if t in lowered: matched.append(t)
+    # NEW: 파일명/경로 토큰을 본문처럼 실제 패턴으로 스캔
+    # - basename 뿐 아니라 마지막 2~3 세그먼트까지 커버
+    # - EMAIL/PHONE/RRN 등 실제 정규식에 '정답'이 나와야만 잡힘
+    fname_tokens = _filename_tokens(key)
+    if fname_tokens:
+        # 토큰 각각을 개별 텍스트로 간주하여 스캔
+        for tok in fname_tokens:
+            found = scan_text_values_all(tok)
+            for k, arr in found.items():
+                ensure_list(vals,k); vals[k].extend(arr)
 
-    return {
-        "values": vals,
-        "risk_hints": {"count": len(matched), "matched": matched}
-    }
+        # 토큰을 공백 결합해 한 번 더 스캔 (예: john.doe+id-010-1234-5678.txt 같은 케이스)
+        joined = " ".join(fname_tokens)
+        found_joined = scan_text_values_all(joined)
+        for k, arr in found_joined.items():
+            ensure_list(vals,k); vals[k].extend(arr)
+
+    return {"values": vals}
 
 # =========================================================
 # 7) CSV/Plain 스캐너
@@ -548,31 +580,28 @@ def decide_category(meta: Dict[str,Any],
       - public      : 일반 개인정보(이메일/전화/주소/계좌/카드/DOB/이름 등) 포함
       - none        : 본문/메타 모두 개인정보 신호 없음
     """
+
     meta_vals = (meta or {}).get("values", {})
     body_vals = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
 
-    # 엔티티 대문자 정규화 (None 방지)
     ents_meta = {(k or "").upper() for k in meta_vals.keys()}
     ents_body = {(k or "").upper() for k in body_vals.keys()}
     ents_pres = {(h.get("entity") or "").upper() for h in presidio_hits if h.get("entity")}
     ents = ents_meta | ents_body | ents_pres
 
-    hints = (meta.get("risk_hints") or {}).get("matched", [])
-    low_hints = [h.lower() for h in hints]
-
-    # 1) 고유식별 우선
-    if ents & ID_ENTS or any(h in low_hints for h in HINTS_IDENTIFIERS):
+    # 고유식별 우선
+    if ents & ID_ENTS:
         return "identifiers", "고유식별정보 포함"
 
-    # 2) 민감(PIPA) 또는 ICD-10(건강정보)
-    if (ents & PIPA_ENTS) or ("ICD10_CODE" in ents) or any(h in low_hints for h in HINTS_SENSITIVE):
+    # 민감(PIPA) 또는 ICD-10(건강정보)
+    if (ents & PIPA_ENTS) or ("ICD10_CODE" in ents):
         return "sensitive", "민감정보 포함"
 
-    # 3) 일반 개인정보
-    if (ents & GENERAL_PII) or any(h in low_hints for h in HINTS_PII):
+    # 일반 개인정보(이메일/전화/주소/카드/계좌/생년월일/이름 등)
+    if ents & GENERAL_PII:
         return "public", "개인정보 포함"
 
-    # 4) 아무 신호도 없으면 none
+    # 엔티티가 전혀 없으면 none
     return "none", "개인정보 없음"
 
 # =========================================================
