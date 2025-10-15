@@ -4,8 +4,10 @@ from aegis_client import trigger_collect
 
 if __name__ == "__main__":
     data = trigger_collect(
-        server_host="http://127.0.0.1:9000",
-        collector_api="http://127.0.0.1:8000",
+        # AEGIS 서버는 게이트웨이의 /aegis 밑으로 노출
+        server_host="http://<gateway-host>:9000/aegis",
+        # Collector는 /collector 밑으로 노출
+        collector_api="http://<gateway-host>:9000/collector",
         only_detected=True,
     )
     print(json.dumps(data, ensure_ascii=False, indent=2))
