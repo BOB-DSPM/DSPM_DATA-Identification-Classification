@@ -7,9 +7,9 @@
 
 import os, io, csv, json, hashlib, subprocess, sys, tarfile, tempfile, shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, Tuple
 
-from fastapi import FastAPI, Query, HTTPException, Body
+from fastapi import FastAPI, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -33,7 +33,7 @@ CONNECTOR_SCRIPT = Path(os.getenv(
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="AEGIS Analyzer API (front-only)", version="3.2.0")
+app = FastAPI(title="AEGIS Analyzer API (front-only)", version="3.2.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
@@ -42,26 +42,43 @@ app.add_middleware(
 def _sha12(s: str) -> str:
     return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:12]
 
+# 안전 JSON 로더 (비어있거나 손상되어도 None 반환)
+def _safe_read_json(path: Path) -> Optional[Any]:
+    try:
+        if not path.exists():
+            return None
+        if path.stat().st_size == 0:
+            return None
+        txt = path.read_text(encoding="utf-8")
+        if not txt.strip():
+            return None
+        return json.loads(txt)
+    except Exception:
+        return None
+
 # ─────────────────────────────────────────────────────────────
 # Manifest / Tree helpers
 # ─────────────────────────────────────────────────────────────
 def _manifest_recursive(base: Path) -> List[str]:
-    """
-    var/results 폴더의 모든 파일 절대경로 목록을 정렬하여 반환.
-    JSON/CSV/압축 등 확장자 구분 없이 파일이면 모두 포함.
-    """
-    return sorted(str(p.resolve()) for p in base.rglob("*") if p.is_file())
+    """var/results 폴더의 모든 파일 절대경로 목록을 정렬하여 반환."""
+    try:
+        return sorted(str(p.resolve()) for p in base.rglob("*") if p.is_file())
+    except Exception:
+        return []
 
 def _tree_node(p: Path) -> Dict[str, Any]:
-    if p.is_dir():
-        return {
-            "type": "dir",
-            "name": p.name,
-            "children": [
-                _tree_node(c) for c in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-            ],
-        }
-    return {"type": "file", "name": p.name, "size": p.stat().st_size, "path": str(p.resolve())}
+    try:
+        if p.is_dir():
+            return {
+                "type": "dir",
+                "name": p.name,
+                "children": [
+                    _tree_node(c) for c in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+                ],
+            }
+        return {"type": "file", "name": p.name, "size": p.stat().st_size, "path": str(p.resolve())}
+    except Exception as e:
+        return {"type": "error", "name": p.name, "error": str(e)}
 
 # ─────────────────────────────────────────────────────────────
 # Models
@@ -109,9 +126,12 @@ class CollectResponse(BaseModel):
     ok: bool
     returncode: int
     results_front: str
-    # 방법 B 추가 필드
     results_manifest: List[str]
     results_dir: str
+    cmd: List[str]
+    stdout: str
+    stderr: str
+    error: Optional[str] = None
 
 # ─────────────────────────────────────────────────────────────
 # Store (front-only)
@@ -123,10 +143,7 @@ class FrontStore:
         self.items: List[FrontItem] = []
 
     def summarize_by_source_runtime(self) -> List[Dict[str, Any]]:
-        """
-        results_front.json 로드된 self.items를 기반으로
-        source 별 엔티티 집계를 런타임으로 계산한다.
-        """
+        """results_front.json 로드된 self.items 기반 source 별 엔티티 집계(런타임)."""
         self.ensure()
         acc: Dict[str, Dict[str, int]] = {}
         counts_by_category: Dict[str, Dict[str, int]] = {}
@@ -137,17 +154,14 @@ class FrontStore:
                 acc[src] = {}
                 counts_by_category[src] = {"public": 0, "sensitive": 0, "identifiers": 0, "none": 0}
 
-            # 엔티티 합계
             for ent, info in (it.entities or {}).items():
                 acc[src][ent] = acc[src].get(ent, 0) + int(info.count or 0)
 
-            # 카테고리 건수
             cat = (it.category or "none").lower()
             if cat not in counts_by_category[src]:
                 counts_by_category[src][cat] = 0
             counts_by_category[src][cat] += 1
 
-        # 결과 정리
         out: List[Dict[str, Any]] = []
         for src, ents in acc.items():
             total_entities = sum(ents.values())
@@ -161,8 +175,6 @@ class FrontStore:
                 "all_entities": sorted(ents.items(), key=lambda x: x[1], reverse=True),
             }
             out.append(row)
-
-        # source 이름 정렬
         out.sort(key=lambda r: r["source"])
         return out
 
@@ -199,16 +211,29 @@ class FrontStore:
         )
 
     def _load(self):
-        if not self.path.exists():
-            self.items = []; self.mtime = 0.0; return
-        mt = self.path.stat().st_mtime
-        if mt == self.mtime: return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        raws = data if isinstance(data, list) else data.get("items", [])
-        self.items = [self._normalize(r) for r in raws if isinstance(r, dict)]
-        self.mtime = mt
+        """파일이 없거나 비어있거나 손상이어도 예외 없이 빈 결과로."""
+        try:
+            if not self.path.exists() or self.path.stat().st_size == 0:
+                self.items = []
+                self.mtime = self.path.stat().st_mtime if self.path.exists() else 0.0
+                return
+            mt = self.path.stat().st_mtime
+            if mt == self.mtime:
+                return
+            data = _safe_read_json(self.path)
+            raws = data if isinstance(data, list) else (data.get("items", []) if isinstance(data, dict) else [])
+            self.items = [self._normalize(r) for r in raws if isinstance(r, dict)]
+            self.mtime = mt
+        except Exception:
+            # 어떤 이유든 로드 실패 시 안전 디폴트
+            self.items = []
+            try:
+                self.mtime = self.path.stat().st_mtime
+            except Exception:
+                self.mtime = 0.0
 
-    def ensure(self): self._load()
+    def ensure(self): 
+        self._load()
 
     def stats(self, *, include_top: bool = True, include_type: bool = True) -> Dict[str, Any]:
         self.ensure()
@@ -244,7 +269,6 @@ class FrontStore:
             out["type_distribution"] = type_dist
         if include_top:
             out["top_entities"] = sorted_entities[:5]
-        # 항상 all_entities 포함시키고 싶으면 아래 줄 유지, 빼고 싶으면 조건 넣으세요.
         out["all_entities"] = sorted_entities
         return out
 
@@ -286,6 +310,13 @@ class FrontStore:
         return out
 
 front_store = FrontStore(RESULTS_FRONT_JSON)
+
+# ─────────────────────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 # ─────────────────────────────────────────────────────────────
 # Endpoints — 파일 단위
@@ -355,54 +386,25 @@ def front_source(
     total=len(rows); start=(page-1)*size; end=start+size
     return ListResponse(total=total, page=page, size=size, items=rows[start:end])
 
-    def gen_csv():
-        buf=io.StringIO(); w=csv.writer(buf)
-        w.writerow(["id","file","source","type","category","reason","risk_hints",
-                    "stats.rows_scanned","stats.total_entities","stats.unique_entity_types","entities(json)"])
-        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-        for it in rows:
-            w.writerow([
-                it.id, it.file, it.source or "", it.type or "", it.category or "", it.reason or "",
-                json.dumps(it.risk_hints, ensure_ascii=False),
-                it.stats.rows_scanned or "", it.stats.total_entities or "",
-                json.dumps(it.stats.unique_entity_types, ensure_ascii=False),
-                json.dumps({k:v.dict() for k,v in it.entities.items()}, ensure_ascii=False),
-            ])
-            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-    return StreamingResponse(gen_csv(),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition":"attachment; filename=results_front.csv"})
-
 @app.get("/api/result/front/{rid}", response_model=FrontItem)
 def front_get(rid: str):
     front_store.ensure()
     for it in front_store.items:
-        if it.id == rid: return it
-    raise HTTPException(status_code=404, detail="Front result not found")
+        if it.id == rid: 
+            return it
+    # 404 대신 빈 형태를 주고 싶다면 아래 반환으로 바꿔도 됨
+    raise Exception("Front result not found")
 
 # ─────────────────────────────────────────────────────────────
 # Endpoints — 리소스(source) 단위 요약 (organize_and_save가 만들어 주는 인덱스 사용)
 # ─────────────────────────────────────────────────────────────
 @app.get("/api/result/source-summary")
 def source_summary():
-    if RESULTS_SOURCE_SUM.exists():
-        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
+    data = _safe_read_json(RESULTS_SOURCE_SUM)
+    if isinstance(data, list):
         return {"items": data}
-    # fallback (파일이 없으면 런타임 집계.)
+    # fallback (파일이 없거나 손상일 경우 런타임 집계)
     return {"items": front_store.summarize_by_source_runtime()}
-
-# @app.get("/api/result/source/{source:path}/entities")
-#def source_entities(source: str):
-#    if RESULTS_SOURCE_SUM.exists():
-#        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
-#        for row in data:
-#            if row.get("source") == source:
-#                return row
-    # 폴백 추가 (파일 없어도 런타임 요약 제공)
-#    for row in front_store.summarize_by_source_runtime():
-#        if row.get("source") == source:
-#            return row
-#    raise HTTPException(status_code=404, detail="source not found")
 
 # ─────────────────────────────────────────────────────────────
 # Manifest / Tree / Archive endpoints 
@@ -433,15 +435,28 @@ def result_archive(fmt: Literal["zip","tar.gz"]="zip"):
 
 # ─────────────────────────────────────────────────────────────
 # Collector trigger — 결과 폴더 고정(var/results)
+# 실패 시에도 200 + ok:false 로 응답 (프론트 일관성)
 # ─────────────────────────────────────────────────────────────
-@app.post("/api/collect")
+@app.post("/api/collect", response_model=CollectResponse)
 def trigger_collect(req: _CollectBody = Body(...)):
-    if not CONNECTOR_SCRIPT.exists():
-        raise HTTPException(500, f"Connector script not found: {CONNECTOR_SCRIPT}")
-
-    # collector_api 최소 유효성
+    # collector_api 최소 유효성 (에러도 ok:false 로 반환)
     if not (req.collector_api and req.collector_api.startswith(("http://","https://"))):
-        raise HTTPException(400, "collector_api must start with http:// or https://")
+        return CollectResponse(
+            ok=False, returncode=400, cmd=[],
+            results_front=str(RESULTS_FRONT_JSON.resolve()),
+            results_manifest=_manifest_recursive(RESULTS_DIR),
+            results_dir=str(RESULTS_DIR.resolve()),
+            stdout="", stderr="", error="collector_api must start with http:// or https://"
+        )
+
+    if not CONNECTOR_SCRIPT.exists():
+        return CollectResponse(
+            ok=False, returncode=127, cmd=[],
+            results_front=str(RESULTS_FRONT_JSON.resolve()),
+            results_manifest=_manifest_recursive(RESULTS_DIR),
+            results_dir=str(RESULTS_DIR.resolve()),
+            stdout="", stderr="", error=f"Connector script not found: {CONNECTOR_SCRIPT}"
+        )
 
     out_path = RESULTS_ALL_JSON
     env = os.environ.copy()
@@ -458,46 +473,55 @@ def trigger_collect(req: _CollectBody = Body(...)):
     if req.extra_args:
         cmd += req.extra_args
 
-    # 실행 결과를 캡처해서 반환
-    proc = subprocess.run(
-        cmd, cwd=str(ROOT), env=env, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(ROOT), env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        # organize_and_save()가 만든 front 보정
+        legacy_front = ROOT / "dspm-analyzer" / "results_front.json"
+        if not RESULTS_FRONT_JSON.exists() and legacy_front.exists():
+            RESULTS_FRONT_JSON.write_text(legacy_front.read_text(encoding="utf-8"), encoding="utf-8")
 
-    # organize_and_save()가 만든 front 보정
-    legacy_front = ROOT / "dspm-analyzer" / "results_front.json"
-    if not RESULTS_FRONT_JSON.exists() and legacy_front.exists():
-        RESULTS_FRONT_JSON.write_text(legacy_front.read_text(encoding="utf-8"), encoding="utf-8")
+        # 리로드
+        front_store.mtime = 0.0
+        front_store.ensure()
 
-    # 리로드
-    front_store.mtime = 0.0
-    front_store.ensure()
+        manifest = _manifest_recursive(RESULTS_DIR)
+        ok = (proc.returncode == 0) and RESULTS_FRONT_JSON.exists()
 
-    # manifest 동봉 (방법 B 반영되어 있다면)
-    manifest = _manifest_recursive(RESULTS_DIR)  # 없으면 생략
-
-    ok = (proc.returncode == 0) and RESULTS_FRONT_JSON.exists()
-    return {
-        "ok": ok,
-        "returncode": proc.returncode,
-        "cmd": cmd,
-        "results_front": str(RESULTS_FRONT_JSON.resolve()),
-        "results_manifest": manifest,
-        "results_dir": str(RESULTS_DIR.resolve()),
-        "stdout": proc.stdout[-4000:],  # 너무 길면 뒤 4000자만
-        "stderr": proc.stderr[-4000:],
-    }
+        return CollectResponse(
+            ok=ok,
+            returncode=proc.returncode,
+            cmd=cmd,
+            results_front=str(RESULTS_FRONT_JSON.resolve()),
+            results_manifest=manifest,
+            results_dir=str(RESULTS_DIR.resolve()),
+            stdout=(proc.stdout or "")[-4000:],
+            stderr=(proc.stderr or "")[-4000:],
+            error=None if ok else "collector run failed or results_front.json missing"
+        )
+    except Exception as e:
+        # 서브프로세스 자체가 터진 경우
+        return CollectResponse(
+            ok=False, returncode=500, cmd=cmd,
+            results_front=str(RESULTS_FRONT_JSON.resolve()),
+            results_manifest=_manifest_recursive(RESULTS_DIR),
+            results_dir=str(RESULTS_DIR.resolve()),
+            stdout="", stderr="", error=str(e)
+        )
 
 # 수동 리로드(디버그용)
 @app.post("/api/result/reload")
 def reload_front():
-    front_store.mtime = 0.0; front_store.ensure()
+    front_store.mtime = 0.0
+    front_store.ensure()
     return {"ok": True, "count": len(front_store.items), "path": str(RESULTS_FRONT_JSON)}
 
 @app.get("/api/result/source/entities")
 def source_entities_qs(source: str):
-    if RESULTS_SOURCE_SUM.exists():
-        data = json.loads(RESULTS_SOURCE_SUM.read_text(encoding="utf-8"))
+    data = _safe_read_json(RESULTS_SOURCE_SUM)
+    if isinstance(data, list):
         for row in data:
             if row.get("source") == source:
                 return row
@@ -505,63 +529,4 @@ def source_entities_qs(source: str):
     for row in front_store.summarize_by_source_runtime():
         if row.get("source") == source:
             return row
-    raise HTTPException(status_code=404, detail="source not found")
-
-# @app.get("/api/result/front-source", response_model=ListResponse)
-# def front_source_qs(
-#    source: str,
-#    page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=200),
-#    q: Optional[str] = None,
-#    category: Optional[str] = None,
-#    type: Optional[str] = Query(None, alias="type"),
-#    entity: Optional[str] = None,
-#    has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
-#    file_prefix: Optional[str] = None,
-#):
-#    rows = front_store.query(q=q, category=category, type_=type, entity=entity,
-#                             has_entities=has_entities, source=source, file_prefix=file_prefix)
-#    total=len(rows); start=(page-1)*size; end=start+size
-#    return ListResponse(total=total, page=page, size=size, items=rows[start:end])
-
-@app.get("/api/result/export")
-def front_export_alias(
-    format: Literal["csv","jsonl"] = Query("csv"),
-    q: Optional[str] = None,
-    category: Optional[str] = None,
-    type: Optional[str] = Query(None, alias="type"),
-    entity: Optional[str] = None,
-    has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
-    source: Optional[str] = None,
-    source_prefix: Optional[str] = None,
-    file_prefix: Optional[str] = None,
-):
-    # 기존 front_export와 동일 동작
-    rows = front_store.query(q=q, category=category, type_=type, entity=entity,
-                             has_entities=has_entities, source=source,
-                             source_prefix=source_prefix, file_prefix=file_prefix)
-
-    if format == "jsonl":
-        def gen_jsonl():
-            for it in rows:
-                yield json.dumps(it.dict(), ensure_ascii=False) + "\n"
-        return StreamingResponse(gen_jsonl(),
-            media_type="application/x-jsonlines",
-            headers={"Content-Disposition":"attachment; filename=results_front.jsonl"})
-
-    def gen_csv():
-        buf=io.StringIO(); w=csv.writer(buf)
-        w.writerow(["id","file","source","type","category","reason","risk_hints",
-                    "stats.rows_scanned","stats.total_entities","stats.unique_entity_types","entities(json)"])
-        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-        for it in rows:
-            w.writerow([
-                it.id, it.file, it.source or "", it.type or "", it.category or "", it.reason or "",
-                json.dumps(it.risk_hints, ensure_ascii=False),
-                it.stats.rows_scanned or "", it.stats.total_entities or "",
-                json.dumps(it.stats.unique_entity_types, ensure_ascii=False),
-                json.dumps({k:v.dict() for k,v in it.entities.items()}, ensure_ascii=False),
-            ])
-            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-    return StreamingResponse(gen_csv(),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition":"attachment; filename=results_front.csv"})
+    return {"error": "source not found"}

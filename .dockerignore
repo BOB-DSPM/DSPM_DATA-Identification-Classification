@@ -1,0 +1,26 @@
+# Python / venv / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local outputs / big files
+var/
+**/var/
+**/results/
+*.db
+*.sqlite*
+*.log
+
+# Git
+.git
+.gitignore
