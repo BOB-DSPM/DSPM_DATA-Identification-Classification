@@ -45,32 +45,83 @@
 
 ---
 
-## 🛠️ 설치
+# DSPM Analyzer Quick Start Guide
 
-### 1) 저장소 클론
+> 실행 중심의 간단한 설치 및 실행 가이드
+
+---
+
+## 🚀 실행 방법 (Quick Start)
+
+### 🧩 1. 설치
+
 ```bash
+# 1) 레포 클론
 git clone https://github.com/BOB-DSPM/DSPM_DATA-Identification-Classification.git
-cd DSPM_DATA-Identification-Classification/dspm-analyzer
-```
+cd DSPM_DATA-Identification-Classification
 
-### 2) 가상환경(venv) 구성
-```bash
+# 2) 가상환경 생성 및 활성화
 python -m venv .venv
 # Windows
-.\.venv\Scripts\activate
+.\.venv\Scriptsctivate
 # macOS/Linux
 source .venv/bin/activate
-```
 
-### 3) 필수 패키지 설치
-```bash
+# 3) 필수 패키지 설치
 pip install -r requirements.txt
+
+# 4) (선택) Presidio 엔진 및 한국어 모델 설치
+pip install presidio-analyzer presidio-anonymizer
+python -m spacy download ko_core_news_sm
 ```
 
-*(선택)* Presidio를 사용하려면:
+---
+
+### ⚙️ 2. 서버 실행
+
 ```bash
-pip install presidio-analyzer presidio-anonymizer
+# FastAPI 서버 실행
+uvicorn server:app --host 0.0.0.0 --port 9000
 ```
+
+- 실행 후 접속: [http://localhost:9000/docs](http://localhost:9000/docs)
+
+---
+
+### 🔍 3. 명령어 예시
+
+#### (1) 로컬 파일 분석
+
+```bash
+python main.py -i sample_payload.json -o results.json
+```
+
+#### (2) 수집 + 분석 (Collector 연계)
+
+```bash
+python scripts/run_collect_and_scan.py   --api http://<gateway-host>:9000/aegis   --out results_all.json   --only-detected
+```
+
+#### (3) API 호출 예시
+
+```bash
+curl -X POST "http://localhost:9000/api/collect" -H "Content-Type: application/json"   -d '{"source":"s3","only_detected":true}'
+
+curl "http://localhost:9000/api/result/front-stats" | jq .
+```
+
+---
+
+### 🧠 요약
+
+| 항목 | 명령어 / 경로 |
+|------|----------------|
+| 의존성 설치 | `pip install -r requirements.txt` |
+| 서버 실행 | `uvicorn server:app --port 9000` |
+| API 문서 | http://localhost:9000/docs |
+| 단일 파일 분석 | `python main.py -i sample.json -o results.json` |
+| 수집+분석 실행 | `python scripts/run_collect_and_scan.py --api <URL>` |
+
 
 ---
 
