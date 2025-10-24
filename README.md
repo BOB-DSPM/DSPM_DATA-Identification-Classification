@@ -45,15 +45,17 @@
 
 ---
 
-# DSPM Analyzer Quick Start Guide
-
-> 실행 중심의 간단한 설치 및 실행 가이드
+# DSPM Analyzer — Install & Run (Tested Command Guide)
 
 ---
 
-## 🚀 실행 방법 (Quick Start)
+## 0) 요구 사항
+- Python 3.10+ (권장 3.11)
+- OS: macOS / Linux / Windows
 
-### 🧩 1. 설치
+---
+
+## 1) 설치
 
 ```bash
 # 1) 레포 클론
@@ -63,65 +65,84 @@ cd DSPM_DATA-Identification-Classification
 # 2) 가상환경 생성 및 활성화
 python -m venv .venv
 # Windows
-.\.venv\Scriptsctivate
+.\.venv\Scripts\activate
 # macOS/Linux
 source .venv/bin/activate
 
 # 3) 필수 패키지 설치
+#   - 제공된 requirements.txt + FastAPI/uvicorn(서버 실행에 필수)
 pip install -r requirements.txt
+pip install fastapi uvicorn[standard]
+```
 
-# 4) (선택) Presidio 엔진 및 한국어 모델 설치
-pip install presidio-analyzer presidio-anonymizer
+> `requirements.txt`에는 Presidio/kiwipiepy/spaCy만 포함되어 있어 **FastAPI/uvicorn은 별도 설치**가 필요합니다.
+
+선택(한국어 토큰 품질 및 Presidio 사용):
+```bash
+pip install presidio-analyzer presidio-anonymizer  # (requirements.txt에 이미 명시됨: 재설치 무방)
 python -m spacy download ko_core_news_sm
 ```
 
 ---
 
-### ⚙️ 2. 서버 실행
+## 2) 샘플 분석(배치) — 결과 파일 생성
+
+`main.py`의 출력 파일을 **`var/results/`** 아래로 지정하면, `server.py`의 API들이 바로 읽을 수 있습니다.
 
 ```bash
-# FastAPI 서버 실행
+# 샘플 입력 생성
+cat > sample_payload.json << 'JSON'
+[
+  {
+    "key": "s3/my-bucket/sample-dir/doc-001.txt",
+    "content": { "text": "홍길동 010-1234-5678, 이메일 test@example.com, 주민등록번호 900101-1234567" }
+  },
+  {
+    "key": "s3/my-bucket/sample-dir/customers.csv",
+    "content": { "text": "name,phone,email\\n이순신,010-9876-5432,lee@example.com" }
+  }
+]
+JSON
+
+# 분석 실행 (결과를 var/results 아래로 저장)
+python main.py -i sample_payload.json -o var/results/results.json
+```
+
+성공 시 생성되는 핵심 파일(일부):
+```
+var/results/
+ ├─ results.json                 # 전체 리포트
+ ├─ results_front.json           # 서버(front) 전용 목록
+ ├─ results_front_by_source.json # 소스별 요약
+ ├─ results.console.txt          # 콘솔 출력 사본
+ └─ classified/…                 # 엔티티별 텍스트 저장
+```
+
+---
+
+## 3) 서버 실행(FastAPI)
+
+```bash
+# FastAPI 서버 기동 (server.py의 app 사용)
 uvicorn server:app --host 0.0.0.0 --port 9000
 ```
 
-- 실행 후 접속: [http://localhost:9000/docs](http://localhost:9000/docs)
+브라우저/도구에서 확인:
+- API 문서: http://localhost:9000/docs  
+- 헬스체크: 
+  ```bash
+  curl http://localhost:9000/health
+  ```
+- 요약 통계:
+  ```bash
+  curl "http://localhost:9000/api/result/front-stats" | jq .
+  ```
+- 리스트(기본 20개 페이징):
+  ```bash
+  curl "http://localhost:9000/api/result/front-list" | jq .
+  ```
 
----
-
-### 🔍 3. 명령어 예시
-
-#### (1) 로컬 파일 분석
-
-```bash
-python main.py -i sample_payload.json -o results.json
-```
-
-#### (2) 수집 + 분석 (Collector 연계)
-
-```bash
-python scripts/run_collect_and_scan.py   --api http://<gateway-host>:9000/aegis   --out results_all.json   --only-detected
-```
-
-#### (3) API 호출 예시
-
-```bash
-curl -X POST "http://localhost:9000/api/collect" -H "Content-Type: application/json"   -d '{"source":"s3","only_detected":true}'
-
-curl "http://localhost:9000/api/result/front-stats" | jq .
-```
-
----
-
-### 🧠 요약
-
-| 항목 | 명령어 / 경로 |
-|------|----------------|
-| 의존성 설치 | `pip install -r requirements.txt` |
-| 서버 실행 | `uvicorn server:app --port 9000` |
-| API 문서 | http://localhost:9000/docs |
-| 단일 파일 분석 | `python main.py -i sample.json -o results.json` |
-| 수집+분석 실행 | `python scripts/run_collect_and_scan.py --api <URL>` |
-
+> 위 호출들이 정상 동작하려면 **2) 단계에서 `var/results/results_front.json`이 생성**되어 있어야 합니다.
 
 ---
 
