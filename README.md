@@ -63,7 +63,7 @@ git clone https://github.com/BOB-DSPM/DSPM_DATA-Identification-Classification.gi
 cd DSPM_DATA-Identification-Classification
 
 # 2) 가상환경 생성 및 활성화
-python -m venv .venv
+python3 -m venv .venv
 # Windows
 .\.venv\Scripts\activate
 # macOS/Linux
