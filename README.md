@@ -59,8 +59,8 @@
 
 ```bash
 # 1) 레포 클론
-git clone https://github.com/BOB-DSPM/DSPM_DATA-Identification-Classification.git
-cd DSPM_DATA-Identification-Classification
+git clone --branch analyzer --single-branch https://github.com/BOB-DSPM/DSPM_DATA-Identification-Classification.git DSPM_DATA-IC-analyzer
+cd DSPM_DATA-IC-analyzer
 
 # 2) 가상환경 생성 및 활성화
 python3 -m venv .venv
@@ -71,6 +71,7 @@ source .venv/bin/activate
 
 # 3) 필수 패키지 설치
 #   - 제공된 requirements.txt + FastAPI/uvicorn(서버 실행에 필수)
+cd dspm-analyzer
 pip install -r requirements.txt
 pip install fastapi uvicorn[standard]
 ```
