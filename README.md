@@ -125,6 +125,7 @@ var/results/
 
 ```bash
 # FastAPI 서버 기동 (server.py의 app 사용)
+# DSPM_DATA-ID-analyzer 디렉터리 안에서
 uvicorn server:app --host 0.0.0.0 --port 9000
 ```
 
