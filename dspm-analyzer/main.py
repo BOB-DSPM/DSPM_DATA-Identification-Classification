@@ -2,6 +2,15 @@
 import os, re, io, csv, json
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
+from datetime import datetime, timedelta, timezone
+
+ANALYZER_ROOT = Path(__file__).resolve().parent
+POLICY_CSV = os.getenv(
+    "POLICY_CSV",
+    str(ANALYZER_ROOT / "var" / "policies" / "Personal_Infor_List.csv")
+)
+
+MATCH_SCOPE = os.getenv("MATCH_SCOPE", "key").lower()
 
 # =========================================================
 # Presidio 준비(선택)
@@ -127,6 +136,20 @@ def _safe_key_filename(orig_key: str) -> str:
     safe = safe.strip().replace("..", ".")
     return safe.strip("/")
 
+def _key_stem_lower(key: str) -> Optional[str]:
+    """
+    S3 key에서 확장자를 제거한 파일명(stem)을 소문자로 반환.
+    예) 'folder/a.csv' -> 'a', 'health_dataset.csv' -> 'health_dataset'
+    """
+    if not key:
+        return None
+    base = os.path.basename(str(key))
+    if not base:
+        return None
+    stem = base.rsplit(".", 1)[0]
+    stem = (stem or "").strip()
+    return stem.lower() if stem else None
+
 def ensure_list(d: Dict[str, List[str]], key: str):
     if key not in d: d[key] = []
 
@@ -173,6 +196,31 @@ def _is_plausible_kr_phone(raw: str) -> bool:
 
 def _digits_len(s: str) -> int:
     return len(re.sub(r"\D","", s or ""))
+
+def _try_parse_dt(s: str):
+    if not s:
+        return None
+    s = str(s).strip()
+    # ISO 8601 with Z
+    if s.endswith("Z"):
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            pass
+    # plain ISO 8601
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        pass
+    # common formats
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+                "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d",
+                "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    return None
 
 def _norm_header(h: str) -> str:
     h = (h or "").strip().lower()
@@ -230,6 +278,67 @@ def _derive_source_label(key: str) -> Optional[str]:
     if svc and ident:
         return f"{svc}/{ident}"
     return None
+
+# ── 경로에서 날짜(YYYY[/MM[/DD]]) 추론 ─────────────────────
+_DATE_PATTERNS = [
+    re.compile(r"(?P<y>20\d{2}|19\d{2})[/-](?P<m>0[1-9]|1[0-2])[/-](?P<d>0[1-9]|[12]\d|3[01])"),
+    re.compile(r"(?P<y>20\d{2}|19\d{2})[/-](?P<m>0[1-9]|1[0-2])"),
+    re.compile(r"(?P<y>20\d{2}|19\d{2})"),
+]
+
+def _parse_date_from_key(key: str) -> Optional[datetime]:
+    s = (key or "").replace("\\", "/")
+    for rx in _DATE_PATTERNS:
+        m = rx.search(s)
+        if m:
+            y = int(m.group("y"))
+            mth = int(m.group("m")) if "m" in m.groupdict() and m.group("m") else 1
+            d = int(m.group("d")) if "d" in m.groupdict() and m.group("d") else 1
+            try:
+                return datetime(y, mth, d, tzinfo=timezone.utc)
+            except Exception:
+                pass
+    return None
+
+# ── 정책 인덱스 전역 초기화 ──────────────────────────────
+try:
+    from policies.loader import load_policies
+    from matcher.bucket_match import build_policy_slug_index, map_bucket_to_policy
+except Exception:
+    load_policies = None
+    build_policy_slug_index = None
+    map_bucket_to_policy = None
+
+_POLICIES: List[Any] = []
+slug_index: Dict[str, Any] = {}
+
+def _init_policy_index():
+    """POLICY_CSV에서 정책을 읽어 1회 전역 인덱스 구축"""
+    global _POLICIES, slug_index
+    if slug_index or not load_policies or not build_policy_slug_index:
+        return
+    p = Path(POLICY_CSV)
+    try:
+        if p.exists():
+            _POLICIES = load_policies(str(p))
+            slug_index = build_policy_slug_index(_POLICIES)
+        else:
+            print(f"[warn] 정책 CSV 미존재: {p}")
+    except Exception as e:
+        print(f"[warn] 정책 CSV 로드 오류: {e}")
+        _POLICIES = []
+        slug_index = {}
+
+def _extract_bucket(key: str):
+    if not key:
+        return None
+    s = str(key).replace("\\", "/")
+    if s.startswith("s3://"):
+        s = s[5:]
+    elif s.startswith("s3/"):
+        s = s[3:]
+    # 첫 세그먼트가 버킷. 슬래시 없으면 매핑하지 않음
+    return s.split("/", 1)[0] if "/" in s else None
 
 # =========================================================
 # 3) CSV 판별
@@ -493,16 +602,77 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
     rows_scanned = 0
     reader = csv.DictReader(io.StringIO(normalized), dialect=dialect)
 
-    for row in reader:
+    # created_at 후보 헤더(소문자/정규화)
+    CREATED_AT_HEADER_HINTS = [
+        "created_at", "created", "ingested_at", "uploaded_at", "last_modified",
+        "생성일", "업로드일", "등록일", "기준일자", "기준일", "작성일"
+    ]
+
+    csv_row_created: List[Dict[str, Any]] = []   # 행별 created_at만 보관
+    rows_detail: List[Dict[str, Any]] = [] 
+
+    fieldnames = [fn or "" for fn in (reader.fieldnames or [])]
+    def _is_created_col(h: str) -> bool:
+        h_raw = (h or "")
+        h_norm = _norm_header(h_raw)
+        return any(hint in h_raw.lower() or hint in h_norm or h_norm == hint for hint in CREATED_AT_HEADER_HINTS)
+
+    created_header_keys = [h for h in fieldnames if _is_created_col(h)]
+
+    for row_no, row in enumerate(reader, start=2):
         rows_scanned += 1
+
+        # (A) 이 행의 엔티티만 모으는 딕셔너리 (행 단위)
+        row_entities: Dict[str, List[str]] = {}
+
+        # (B) 값/엔티티 스캔 — 전체 합산(values) + 행 단위(row_entities) 모두 채움
         for col, raw in (row or {}).items():
             if raw is None:
                 continue
             found = scan_value_with_header(str(col), str(raw))
+            # 전체 합산
             for k, arr in found.items():
                 ensure_list(values, k); values[k].extend(arr)
+            # 행 단위
+            for k, arr in found.items():
+                ensure_list(row_entities, k); row_entities[k].extend(arr)
 
-    return {"rows_scanned": rows_scanned, "values_text": values}
+        # (C) created_at 추출 (이 행)
+        created_iso = None
+        if created_header_keys:
+            for col in created_header_keys:
+                raw = row.get(col)
+                if not raw:
+                    continue
+                dt = _try_parse_dt(raw)
+                if dt:
+                    created_iso = dt.isoformat()
+                    csv_row_created.append({"row": row_no, "created_at": created_iso})
+                    break
+
+        # (D) 행 단위 결과에 저장 (원본 행 일부도 함께 담아두면 디버깅/알림문에 사용 가능)
+        rows_detail.append({
+            "row": row_no,
+            "created_at": created_iso,
+            "entities": row_entities,
+            # 필요시 식별에 쓸 주요 컬럼들을 일부만 보관:
+            "row_key_fields": {
+                "health_id": row.get("health_id"),
+                "name_ko": row.get("name_ko"),
+                "email": row.get("email"),
+                "phone": row.get("phone"),
+            }
+        })
+
+    out: Dict[str, Any] = {
+        "rows_scanned": rows_scanned,
+        "values_text": values,
+        "rows_detail": rows_detail,    
+    }
+    if csv_row_created:
+        out["csv_row_created"] = csv_row_created
+
+    return out
 
 def detect_in_plain_text(text: str) -> Dict[str, Any]:
     return {"values": scan_text_values_all(text)}
@@ -618,7 +788,22 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
 
     lines.append(f" ├─ 형식: {ctype}")
 
-    body_vals = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
+    # 추가된 부분: values 사전도 함께 확인
+    values_dict = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
+
+    rb   = findings.get("__retention_base__")       or values_dict.get("__retention_base__")
+    due  = findings.get("__retention_due_at__")     or values_dict.get("__retention_due_at__")
+    viol = findings.get("__retention_violation__")  or values_dict.get("__retention_violation__")
+
+    if rb or due:
+        lines.append(" ├─ 보존 기준:")
+        if isinstance(rb, dict) and (rb.get("source") or rb.get("value")):
+            lines.append(f" │   • 기준 소스: {rb.get('source')}")
+            lines.append(f" │   • 기준 값  : {rb.get('value')}")
+        if due is not None:
+            lines.append(f" │   • 만료 시점: {due}  ({'위반' if viol else '정상'})")
+
+    body_vals = values_dict
     if body_vals:
         safe_vals = _mask_values_for_console(body_vals)
         lines.append(" ├─ 본문 탐지:")
@@ -627,7 +812,6 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
     else:
         lines.append(" ├─ 본문 탐지: 없음")
 
-    # 엔티티별 저장 경로 표시
     if body_vals:
         safe_key = _safe_key_filename(key)
         lines.append(" ├─ 저장 경로(엔티티별):")
@@ -655,17 +839,27 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
     ctype = "unknown"
 
     presidio_hits: List[Dict[str,Any]] = []
+    rows_detail: List[Dict[str, Any]] = [] 
     if text:
         if looks_like_csv(text):
             ctype = "text/csv"
             res = detect_in_csv_text(text)
             findings.update(res)
+            # CSV일 때만 행단위 created_at 반영
+            row_list = res.get("csv_row_created")
+            if row_list:
+                meta.setdefault("csv_meta", {})
+                meta["csv_meta"]["row_created"] = row_list
+            
+            rows_detail = res.get("rows_detail") or []
+
             presidio_hits = run_presidio([text])
             _merge_presidio_hits_into_findings(findings, presidio_hits, is_csv=True)
         else:
             ctype = "text/plain"
             res = detect_in_plain_text(text)
             findings.update(res)
+            # 평문 분기에서는 created_at 행리스트/최솟값 등의 처리를 하지 않음
             presidio_hits = run_presidio([text])
             _merge_presidio_hits_into_findings(findings, presidio_hits, is_csv=False)
     elif metrics is not None:
@@ -693,30 +887,208 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
         "type": ctype,
         "metadata": {
             "detected": meta.get("values", {}),
+            "csv_meta": meta.get("csv_meta", {}),
             "risk_hints": meta.get("risk_hints", {})
         },
         "body": {"detected": (findings.get("values_text") or findings.get("values") or {})},
+        "body_rows": rows_detail, 
         "presidio": presidio_hits,
         "classification": {
             "category": category,
             "reason": reason,
-            # 엔티티별 경로 제공
             "saved_paths": saved_paths
         },
         "console_like": console_like
     }
     return report
 
-# =========================================================
-# 12) 저장/출력
-# =========================================================
-def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
-    console_blocks: List[str] = []
+def enrich_with_policy(rec: dict) -> dict:
+    _init_policy_index()
+    global slug_index
 
-    # 콘솔 출력 + full JSON 저장
+    # 기본값 초기화
+    rec["policy_map"] = None
+    rec["retention_due_at"] = None
+    rec["retention_violation"] = None
+    rec["retention_base"] = None
+
+    # 정책 인덱스 없으면 매핑 종료
+    if not slug_index:
+        return rec
+
+    # --- 여기부터: key(stem) 기준 매핑만 허용 ---
+    key_stem = _key_stem_lower(rec.get("file") or rec.get("key") or "")
+    if not key_stem:
+        return rec
+
+    # slug_index는 소문자 키라고 가정하고, 동일하게 소문자 stem으로 매핑
+    p = map_bucket_to_policy(key_stem, slug_index)
+    if not p:
+        return rec  # 매핑 실패 시: 이후 DEFAULT_ROW_RETENTION_DAYS로 행 단위 계산 가능
+
+    rec["policy_map"] = {
+        "policy_id": p.policy_id,
+        "file_name": p.file_name,
+        "retention_raw": p.retention_raw,
+        "retention_type": p.retention_type,
+        "retention_days": p.retention_days,
+    }
+
+    rec["retention_due_at"] = None
+    rec["retention_violation"] = None
+    rec["retention_base"] = None
+
+    if not (p.retention_type == "fixed" and p.retention_days):
+        return rec
+
+    row_list = ((rec.get("metadata") or {}).get("csv_meta") or {}).get("row_created") or []
+    debug_also_file_level = bool(int(os.getenv("DEBUG_FILE_RETENTION_ALSO_WHEN_ROW_CREATED", "0")))
+
+    if row_list and not debug_also_file_level:
+        rec["retention_base"] = {"source": "csv_row_created", "value": f"rows={len(row_list)}"}
+        return rec
+
+    meta = rec.get("metadata") or {}
+    base_dt = None
+    base_info = None
+
+    base_raw = meta.get("last_modified") or rec.get("last_modified")
+    if base_dt is None and base_raw:
+        dt = _try_parse_dt(base_raw)
+        if dt:
+            base_dt = dt
+            base_info = {"source": "last_modified", "value": str(base_raw)}
+
+    if base_dt is None:
+        dt_from_key = _parse_date_from_key(rec.get("file") or rec.get("key") or "")
+        if dt_from_key is not None:
+            base_dt = dt_from_key
+            base_info = {"source": "key_path_date", "value": dt_from_key.isoformat()}
+
+    if base_dt is None:
+        base_raw = meta.get("creation_date") or rec.get("creation_date")
+        if base_raw:
+            dt = _try_parse_dt(base_raw)
+            if dt:
+                base_dt = dt
+                base_info = {"source": "creation_date", "value": str(base_raw)}
+
+    if base_dt is not None:
+        try:
+            days = int(p.retention_days)
+        except Exception:
+            days = int(str(p.retention_days).strip() or "0")
+
+        due = base_dt + timedelta(days=days)
+        rec["retention_due_at"] = due.isoformat()
+        rec["retention_violation"] = (datetime.now(timezone.utc) > due)
+        rec["retention_base"] = base_info
+    else:
+        if not row_list:
+            rec["retention_base"] = {"source": "none", "value": ""}
+
+    return rec
+
+def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
+    # ─────────────────────────────────────────────────────────
+    # 정책 CSV가 없을 때 기본 행(ROW) 보존기간 일수 (없으면 0=미계산)
+    DEFAULT_ROW_RETENTION_DAYS = int(os.getenv("DEFAULT_ROW_RETENTION_DAYS", "0"))
+    # 모든 파일에서 초과(만료)된 행만 모아 alerts.json으로 저장
+    alerts_bucket: List[Dict[str, Any]] = []
+    # ─────────────────────────────────────────────────────────
+
+    enriched_reports = []
     for r in reports:
-        body_detected = r.get("body", {}).get("detected", {}) or {}
-        if body_detected:
+        # 1) 정책 enrich (retention_days 등 계산에 필요)
+        r = enrich_with_policy(r)
+
+        # 2) ── 행(ROW) 단위 보존기간 계산 ─────────────────────────
+        # policy_days: 정책 CSV(fixed) > 기본값 환경변수(DEFAULT_ROW_RETENTION_DAYS)
+        policy_days = None
+        pm = r.get("policy_map") or {}
+        if pm.get("retention_type") == "fixed" and pm.get("retention_days"):
+            try:
+                policy_days = int(pm["retention_days"])
+            except Exception:
+                policy_days = None
+        if policy_days is None and DEFAULT_ROW_RETENTION_DAYS > 0:
+            policy_days = DEFAULT_ROW_RETENTION_DAYS
+
+        # rows_detail 키(또는 body_rows 키)로 행별 정보 가져오기 (둘 다 지원)
+        rows_detail = r.get("body_rows") or r.get("rows_detail") or []
+        row_alerts: List[Dict[str, Any]] = []
+        now_utc = datetime.now(timezone.utc)
+
+        if policy_days:
+            for rd in rows_detail:
+                created_iso = rd.get("created_at")
+                if not created_iso:
+                    continue
+                dt = _try_parse_dt(created_iso)
+                if not dt:
+                    continue
+                due = dt + timedelta(days=policy_days)
+                violation = (now_utc > due)
+
+                # 행 객체에 보존 계산 결과 주입
+                rd.setdefault("retention", {})
+                rd["retention"].update({
+                    "policy_days": policy_days,
+                    "due_at": due.isoformat(),
+                    "violation": violation,
+                })
+
+                # 초과(만료)행이면 알림 큐에 적재
+                if violation:
+                    row_alerts.append({
+                        "file": r.get("file"),
+                        "row": rd.get("row"),
+                        "created_at": created_iso,
+                        "due_at": due.isoformat(),
+                        # 알림에 표시할 최소 식별 정보(원하면 더 추가)
+                        "row_key_fields": (rd.get("row_key_fields") or {
+                            # 호환: CSV에 이런 헤더가 있으면 채워졌을 가능성 있음
+                            "name_ko": (rd.get("entities") or {}).get("KR_NAME", [None])[0],
+                            "email": (rd.get("entities") or {}).get("EMAIL_ADDRESS", [None])[0],
+                            "phone": (rd.get("entities") or {}).get("PHONE_NUMBER", [None])[0],
+                        }),
+                        "entities": rd.get("entities"),
+                    })
+
+        # 파일 리포트에 alerts(파일별) 부착 + 전체 alerts 버킷에 합산
+        if row_alerts:
+            r["alerts"] = row_alerts
+            alerts_bucket.extend(row_alerts)
+
+        # 3) body.detected에 보존 디버그 키 주입(기존 유지)
+        det = r.setdefault("body", {}).setdefault("detected", {}) or {}
+        rb = r.get("retention_base")
+        if rb is not None:
+            det["__retention_base__"] = rb
+        if r.get("retention_due_at") is not None:
+            det["__retention_due_at__"] = r["retention_due_at"]
+        if r.get("retention_violation") is not None:
+            det["__retention_violation__"] = r["retention_violation"]
+
+        # 4) console_like 재생성(기존 유지)
+        key = r.get("file","")
+        ctype = r.get("type","unknown")
+        findings = {"values_text": det}
+        category = (r.get("classification") or {}).get("category","none")
+        reason   = (r.get("classification") or {}).get("reason","")
+        r["console_like"] = build_console_like(key, ctype, findings, category, reason)
+
+        enriched_reports.append(r)
+
+    reports = enriched_reports
+
+    # ===== 콘솔 출력 + results.json 저장 (기존 유지) =====
+    console_blocks: List[str] = []
+    for r in reports:
+        det = r.get("body", {}).get("detected", {}) or {}
+        has_pii = any(k for k in det.keys() if not str(k).startswith("__retention_"))
+        has_ret = any(k in det for k in ("__retention_base__","__retention_due_at__","__retention_violation__"))
+        if has_pii or has_ret:
             block = "\n" + r["console_like"]
             print(block)
             console_blocks.append(block)
@@ -725,7 +1097,13 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     out_json_path.write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n결과 JSON 저장: {out_json_path.resolve()}")
 
-    # ===== Front 전용 결과(results_front.json) 생성 =====
+    # 추가 저장: 모든 파일의 만료행 합본 alerts.json
+    base_dir = out_json_path.parent
+    alerts_path = base_dir / "alerts.json"
+    alerts_path.write_text(json.dumps(alerts_bucket, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Alerts 저장: {alerts_path.resolve()}  (rows={len(alerts_bucket)})")
+
+    # ===== Front 전용 결과(results_front.json) 생성 (기존 + 만료행 카운트 추가) =====
     front_reports = []
     for r in reports:
         file = r.get("file")
@@ -733,6 +1111,8 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         category = r.get("classification", {}).get("category")
         reason = r.get("classification", {}).get("reason")
         saved_paths = r.get("classification", {}).get("saved_paths", {})
+        expired_rows = len(r.get("alerts", []))  
+
         front_reports.append({
             "file": file,
             "source": _derive_source_label(file),
@@ -743,7 +1123,8 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
             "stats": {
                 "rows_scanned": r.get("body", {}).get("rows_scanned"),
                 "total_entities": len(findings or {}),
-                "unique_entity_types": list((findings or {}).keys())
+                "unique_entity_types": list((findings or {}).keys()),
+                "expired_rows": expired_rows,  
             },
             "entities": {
                 ent: {
@@ -755,12 +1136,12 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 for ent, vals in findings.items()
             }
         })
-    base_dir = out_json_path.parent
+
     front_path = base_dir / "results_front.json"
     front_path.write_text(json.dumps(front_reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Front 결과 저장: {front_path.resolve()}")
 
-    # 콘솔 사본
+    # 콘솔 사본 (기존 유지)
     console_path = base_dir / "results.console.txt"
     if console_blocks:
         console_path.write_text("\n".join(console_blocks) + "\n", encoding="utf-8")
@@ -768,16 +1149,15 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         console_path.write_text("# 본문 탐지 결과가 있는 항목이 없어 콘솔 출력이 없습니다.\n", encoding="utf-8")
     print(f"콘솔 출력 사본 저장: {console_path.resolve()}")
 
-    # ===== 엔티티별 텍스트 저장 (파일 단위) =====
+    # 엔티티별 텍스트 저장 (기존 유지)
     for r in reports:
         body_detected: Dict[str, List[str]] = r.get("body", {}).get("detected", {}) or {}
         if not body_detected:
             continue
-
         safe_key = re.sub(r"[<>:\"\\|?*]", "", r.get("file", "unknown")).strip().replace("..", ".").strip("/")
         for ent, vals in body_detected.items():
             if not vals: continue
-            bucket = _bucket_for_entity(ent)  # public / sensitive / identifiers
+            bucket = _bucket_for_entity(ent)
             per_ent_path = base_dir / CLASSIFY_ROOT / bucket / f"{safe_key}__{ent}.txt"
             per_ent_path.parent.mkdir(parents=True, exist_ok=True)
             per_ent_content = [
@@ -789,22 +1169,19 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
             ] + [str(v) for v in vals]
             per_ent_path.write_text("\n".join(per_ent_content) + "\n", encoding="utf-8")
 
-    # ===== 리소스(source) 단위 롤업 인덱스/아카이브 =====
-    # source 라벨 = _derive_source_label(file)
+    # 리소스(source) 롤업 (기존 유지)
     by_source: Dict[str, Dict[str, Any]] = {}
     for r in reports:
         src_label = _derive_source_label(r.get("file","")) or "unknown"
         body = r.get("body", {}).get("detected", {}) or {}
         cat = (r.get("classification", {}) or {}).get("category", "none")
-
         rec = by_source.setdefault(src_label, {
             "files": set(),
             "category_counts": {},
-            "entities": {}  # ent -> {"bucket":..., "values": set()}
+            "entities": {}
         })
         rec["files"].add(r.get("file",""))
         rec["category_counts"][cat] = rec["category_counts"].get(cat, 0) + 1
-
         for ent, vals in body.items():
             if not vals: continue
             entrec = rec["entities"].setdefault(ent, {"bucket": _bucket_for_entity(ent), "values": set()})
@@ -814,7 +1191,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 except Exception:
                     pass
 
-    # 인덱스 JSON (프론트 source-summary용)
     rollup = []
     for src, rec in by_source.items():
         ent_out = {}
@@ -834,7 +1210,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     by_source_path.write_text(json.dumps(rollup, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"리소스 요약 저장: {by_source_path.resolve()}")
 
-    # (선택) 리소스별 통합 텍스트 아카이브
+    # (선택) 리소스별 통합 텍스트 아카이브 (기존 유지)
     for src, rec in by_source.items():
         safe_src = re.sub(r"[^\w\-\.]+", "_", src or "unknown")
         for ent, e in rec["entities"].items():
@@ -900,6 +1276,9 @@ def preprocess_payload(payload: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
 # =========================================================
 if __name__ == "__main__":
     import argparse
+    import json
+    from pathlib import Path
+    from datetime import datetime, timedelta  # ← enrich_with_policy에서 사용
 
     parser = argparse.ArgumentParser(
         description="PII/Sensitive scanner (console-like JSON & classification)"
@@ -934,5 +1313,7 @@ if __name__ == "__main__":
     # 분석 실행
     reports = [analyze_one_blob(b) for b in worklist]
 
-    # 저장/출력
-    organize_and_save(reports, Path(args.output))  
+    from pathlib import Path
+    organize_and_save(reports, Path(args.output))
+
+    print(f"[ok] 결과 저장: {Path(args.output).resolve()}")
