@@ -58,6 +58,8 @@ def build_policy_slug_index(policies) -> Dict[str, object]:
         keys = _variants(p.file_name)
         for k in keys:
             idx[k] = p
+            # 디버그 로그 추가
+            print(f"[DEBUG] build_policy_slug_index: '{k}' -> policy_id={p.policy_id}, file_name='{p.file_name}'")
     return idx
 
 def map_bucket_to_policy(bucket: str, slug_index: Dict[str, object]):
@@ -68,19 +70,27 @@ def map_bucket_to_policy(bucket: str, slug_index: Dict[str, object]):
     - 접두 일치도 허용 (ex: foo_01, foo_prod)
     """
     if not bucket:
+        print(f"[DEBUG] map_bucket_to_policy: bucket is empty")
         return None
 
     # 정확 매칭
-    for k in _variants(bucket):
+    bucket_variants = _variants(bucket)
+    print(f"[DEBUG] map_bucket_to_policy: bucket='{bucket}', variants={bucket_variants}")
+    
+    for k in bucket_variants:
         hit = slug_index.get(k)
         if hit:
+            print(f"[DEBUG] map_bucket_to_policy: exact match '{k}' -> policy_id={hit.policy_id}")
             return hit
 
     # 접두 일치 허용
-    b_norms = _variants(bucket)
+    b_norms = bucket_variants
     for b in b_norms:
         for k in slug_index.keys():
             if b.startswith(k + "_") or b.startswith(k + "-"):
-                return slug_index[k]
+                hit = slug_index[k]
+                print(f"[DEBUG] map_bucket_to_policy: prefix match '{b}' starts with '{k}' -> policy_id={hit.policy_id}")
+                return hit
 
+    print(f"[DEBUG] map_bucket_to_policy: no match for bucket '{bucket}'")
     return None

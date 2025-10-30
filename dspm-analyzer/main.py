@@ -209,7 +209,12 @@ def _try_parse_dt(s: str):
             pass
     # plain ISO 8601
     try:
-        return datetime.fromisoformat(s)
+        
+        dt = datetime.fromisoformat(s)
+        # *** 수정: timezone이 없으면 UTC 부여 ***
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         pass
     # common formats
@@ -217,7 +222,11 @@ def _try_parse_dt(s: str):
                 "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d",
                 "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(s, fmt)
+            # *** timezone이 없으면 UTC 부여 ***
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except Exception:
             continue
     return None
@@ -619,6 +628,10 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
 
     created_header_keys = [h for h in fieldnames if _is_created_col(h)]
 
+    # *** 디버깅 출력 추가 ***
+    print(f"[DEBUG CSV] 헤더: {fieldnames}")
+    print(f"[DEBUG CSV] created_at 매칭된 헤더: {created_header_keys}")
+
     for row_no, row in enumerate(reader, start=2):
         rows_scanned += 1
 
@@ -997,6 +1010,8 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     alerts_bucket: List[Dict[str, Any]] = []
     # ─────────────────────────────────────────────────────────
 
+    print(f"\n[DEBUG] DEFAULT_ROW_RETENTION_DAYS = {DEFAULT_ROW_RETENTION_DAYS}")
+
     enriched_reports = []
     for r in reports:
         # 1) 정책 enrich (retention_days 등 계산에 필요)
@@ -1014,21 +1029,34 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         if policy_days is None and DEFAULT_ROW_RETENTION_DAYS > 0:
             policy_days = DEFAULT_ROW_RETENTION_DAYS
 
+        print(f"\n[DEBUG] 파일: {r.get('file')}")
+        print(f"[DEBUG] policy_days: {policy_days}")
+
         # rows_detail 키(또는 body_rows 키)로 행별 정보 가져오기 (둘 다 지원)
         rows_detail = r.get("body_rows") or r.get("rows_detail") or []
+        print(f"[DEBUG] rows_detail 개수: {len(rows_detail)}")
+        
         row_alerts: List[Dict[str, Any]] = []
         now_utc = datetime.now(timezone.utc)
 
         if policy_days:
             for rd in rows_detail:
                 created_iso = rd.get("created_at")
+                print(f"[DEBUG]   Row {rd.get('row')}: created_at={created_iso}")
+                
                 if not created_iso:
                     continue
                 dt = _try_parse_dt(created_iso)
                 if not dt:
+                    print(f"[DEBUG]     -> 파싱 실패")
                     continue
+                
+                print(f"[DEBUG]     -> 파싱됨: {dt}")
+                
                 due = dt + timedelta(days=policy_days)
                 violation = (now_utc > due)
+                
+                print(f"[DEBUG]     -> due={due}, now={now_utc}, violation={violation}")
 
                 # 행 객체에 보존 계산 결과 주입
                 rd.setdefault("retention", {})
@@ -1040,6 +1068,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
 
                 # 초과(만료)행이면 알림 큐에 적재
                 if violation:
+                    print(f"[DEBUG]     -> *** ALERT 적재 ***")
                     row_alerts.append({
                         "file": r.get("file"),
                         "row": rd.get("row"),

@@ -102,20 +102,47 @@ class FallbackBeliefRecognizer(PatternRecognizer):
 
 # ============== ISO 날짜/일시 인식기 ==============
 ISO_DATE_PATTERNS = [
+    # 구분자 있는 형식: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD (한 자리 일자 포함)
     Pattern(
         name="iso_ymd_sep",
-        regex=r"\b(19|20)\d{2}[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])\b",
-        score=0.6,
+        regex=r"\b(1[89]|20)\d{2}[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])\b",
+        score=0.7,
     ),
+    # 구분자 있는 형식 (한 자리 월도 지원): YYYY-M-D
+    Pattern(
+        name="iso_ymd_sep_flexible",
+        regex=r"\b(1[89]|20)\d{2}[-/.]([1-9]|0[1-9]|1[0-2])[-/.]([1-9]|0[1-9]|[12]\d|3[01])\b",
+        score=0.7,
+    ),
+    # 구분자 없는 형식: YYYYMMDD (두 자리 고정)
     Pattern(
         name="iso_ymd_compact",
-        regex=r"\b(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b",
-        score=0.5,
+        regex=r"\b(1[89]|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b",
+        score=0.6,
     ),
+    # ISO 8601 datetime 형식
     Pattern(
         name="iso_datetime",
-        regex=r"\b(19|20)\d{2}-[01]\d-[0-3]\d[T ][0-2]\d:[0-5]\d(?::[0-5]\d)?(?:\.\d+)?(?:Z|[+-][0-2]\d:?[0-5]\d)?\b",
-        score=0.7,
+        regex=r"\b(1[89]|20)\d{2}-[01]\d-[0-3]\d[T ][0-2]\d:[0-5]\d(?::[0-5]\d)?(?:\.\d+)?(?:Z|[+-][0-2]\d:?[0-5]\d)?\b",
+        score=0.8,
+    ),
+    # 짧은 형식: YY-MM-DD, YY/MM/DD, YY.MM.DD (한 자리 일자 포함)
+    Pattern(
+        name="short_ymd_sep",
+        regex=r"\b\d{2}[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])\b",
+        score=0.5,
+    ),
+    # 역순 형식: DD-MM-YYYY, DD/MM/YYYY (한 자리 일자 포함)
+    Pattern(
+        name="dmy_format",
+        regex=r"\b(0?[1-9]|[12]\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](1[89]|20)\d{2}\b",
+        score=0.6,
+    ),
+    # 미국식: MM-DD-YYYY, MM/DD/YYYY (한 자리 일자 포함)
+    Pattern(
+        name="mdy_format",
+        regex=r"\b(0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])[-/.](1[89]|20)\d{2}\b",
+        score=0.6,
     ),
 ]
 
@@ -128,6 +155,7 @@ class IsoDateRecognizer(PatternRecognizer):
             patterns=ISO_DATE_PATTERNS,
             supported_language="all",
         )
+
 
 
 # ============== 커스텀 인식기 등록 ==============

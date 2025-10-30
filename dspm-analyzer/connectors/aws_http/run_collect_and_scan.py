@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # main.py의 상위 파이프라인 재사용!
 from main import analyze_one_blob, organize_and_save
 
-API_TIMEOUT = 12.0
+API_TIMEOUT = 120.0
 
 
 # ============================= 공통 유틸 =============================

@@ -476,7 +476,7 @@ def trigger_collect(req: _CollectBody = Body(...)):
     try:
         proc = subprocess.run(
             cmd, cwd=str(ROOT), env=env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            stdout=None, stderr=None  # ← None으로 변경하면 터미널에 직접 출력
         )
         # organize_and_save()가 만든 front 보정
         legacy_front = ROOT / "dspm-analyzer" / "results_front.json"
