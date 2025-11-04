@@ -216,8 +216,34 @@ class S3IDMatcher:
             try:
                 import json as json_lib
                 
-                data = json_lib.loads(text)
-                print(f"    [JSON 파싱] 성공")
+                # 먼저 일반 JSON으로 파싱 시도
+                try:
+                    data = json_lib.loads(text)
+                    print(f"    [JSON 파싱] 성공 (단일 JSON)")
+                    is_jsonl = False
+                except json_lib.JSONDecodeError:
+                    # 실패하면 JSONL(JSON Lines) 형식으로 시도
+                    print(f"    [JSON 파싱] JSONL 형식으로 재시도")
+                    data = []
+                    line_num = 0
+                    for line in text.strip().split('\n'):
+                        line = line.strip()
+                        if line:
+                            try:
+                                line_num += 1
+                                obj = json_lib.loads(line)
+                                data.append(obj)
+                            except json_lib.JSONDecodeError as e:
+                                print(f"    [JSONL 라인 {line_num} 파싱 실패] {e}")
+                                continue
+                    
+                    if not data:
+                        print(f"    [JSON 파싱 실패] 일반 JSON도 JSONL도 아님")
+                        return {'found_ids': set(), 'matches': []}
+                    
+                    print(f"    [JSONL 파싱] 성공 ({len(data)}개 라인)")
+                    # JSONL은 항상 배열로 처리
+                    is_jsonl = True
                 
                 # JSON 구조 분석
                 if isinstance(data, list):
@@ -234,7 +260,7 @@ class S3IDMatcher:
                                         'id': num,
                                         'row_data': item,
                                         'row_number': idx + 1,
-                                        'source': 'json_array'
+                                        'source': 'jsonl' if is_jsonl else 'json_array'
                                     })
                                     print(f"    [매칭] index {idx}: id={num}")
                             except (ValueError, TypeError, KeyError):
@@ -282,9 +308,6 @@ class S3IDMatcher:
                 print(f"    [JSON 완료] {len(found_ids)}개 ID 발견")
                 return {'found_ids': found_ids, 'matches': matches}
                 
-            except json_lib.JSONDecodeError as e:
-                print(f"    [JSON 파싱 실패] {e}")
-                return {'found_ids': set(), 'matches': []}
             except Exception as e:
                 print(f"    [JSON 처리 오류] {e}")
                 import traceback
