@@ -165,7 +165,7 @@ class RDSCollectorScanRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "collector_api": "http://211.44.183.248:8000",
+                "collector_api": "http://127.0.0.1:8000",
                 "rds_configs": {
                     "my-rds-instance": {
                         "port": 5432,
@@ -197,7 +197,7 @@ class RDSCollectorScanRequestV2(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "collector_api": "http://211.44.183.248:8000",
+                "collector_api": "http://127.0.0.1:8000",
                 "passwords": {
                     "my-rds-1": "custom_password1"
                 },
@@ -917,14 +917,14 @@ def scan_rds_auto_endpoint(req: RDSCollectorScanRequestV2 = Body(...)):
     **사용 예시:**
     ```json
     {
-      "collector_api": "http://211.44.183.248:8000"
+      "collector_api": "http://127.0.0.1:8000"
     }
     ```
     
     특정 RDS에 다른 비밀번호 사용:
     ```json
     {
-      "collector_api": "http://211.44.183.248:8000",
+      "collector_api": "http://127.0.0.1:8000",
       "passwords": {"my-rds-1": "custom_password"}
     }
     ```

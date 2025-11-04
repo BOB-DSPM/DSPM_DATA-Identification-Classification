@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 s3_id_matcher.py
-RDS에서 추출한 ID를 Collector API를 통해 S3 파일에서 직접 검색
+RDS에서 추출한 ID를 Collector API의 Explorer를 통해 S3 파일에서 직접 검색
 """
 
 import json
@@ -18,7 +18,7 @@ class S3IDMatcher:
     def __init__(self, collector_api: str):
         """
         Args:
-            collector_api: Collector API 엔드포인트 (예: http://211.44.183.248:8000)
+            collector_api: Collector API 엔드포인트 (예: http://127.0.0.1:8000)
         """
         self.collector_api = collector_api.rstrip('/')
         self.session = requests.Session()
@@ -26,19 +26,22 @@ class S3IDMatcher:
     def get_s3_buckets(self) -> List[Dict[str, Any]]:
         """Collector에서 S3 버킷 목록 조회"""
         try:
-            url = f"{self.collector_api}/api/repositories"
+            url = f"{self.collector_api}/api/s3-buckets"
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
-            repos = response.json()
+            buckets = response.json()
             
-            # S3 타입만 필터링
-            s3_buckets = [r for r in repos if r.get('type') == 's3']
+            if not isinstance(buckets, list):
+                print(f"[Collector] 예상치 못한 응답 형식: {type(buckets)}")
+                return []
             
-            print(f"[Collector] S3 버킷 {len(s3_buckets)}개 발견")
-            for bucket in s3_buckets:
-                print(f"  - {bucket.get('name', 'unknown')}")
+            print(f"[Collector] S3 버킷 {len(buckets)}개 발견")
+            for bucket in buckets:
+                bucket_name = bucket.get('Name') or bucket.get('name')
+                if bucket_name:
+                    print(f"  - {bucket_name}")
             
-            return s3_buckets
+            return buckets
         except Exception as e:
             print(f"[Collector] S3 버킷 조회 실패: {e}")
             return []
@@ -50,7 +53,7 @@ class S3IDMatcher:
         max_keys: int = 1000
     ) -> List[Dict[str, Any]]:
         """
-        S3 버킷의 파일 목록 조회
+        S3 버킷의 파일 목록 조회 (Explorer 사용)
         
         Args:
             bucket_name: S3 버킷명
@@ -58,7 +61,8 @@ class S3IDMatcher:
             max_keys: 최대 조회 개수
         """
         try:
-            url = f"{self.collector_api}/api/repositories/s3/{bucket_name}/files"
+            # Explorer 엔드포인트 사용
+            url = f"{self.collector_api}/api/explorer/s3/{bucket_name}"
             params = {
                 'prefix': prefix,
                 'max_keys': max_keys
@@ -68,7 +72,14 @@ class S3IDMatcher:
             response.raise_for_status()
             result = response.json()
             
-            files = result.get('files', [])
+            # 다양한 응답 형식 처리
+            files = []
+            if isinstance(result, dict):
+                # {'objects': [...]} 또는 {'Contents': [...]} 형식
+                files = result.get('objects', result.get('Contents', result.get('files', [])))
+            elif isinstance(result, list):
+                files = result
+            
             print(f"[Collector] {bucket_name}: {len(files)}개 파일 발견")
             
             return files
@@ -82,7 +93,7 @@ class S3IDMatcher:
         file_key: str
     ) -> Optional[str]:
         """
-        S3 파일 내용 다운로드
+        S3 파일 내용 다운로드 (boto3 직접 사용)
         
         Args:
             bucket_name: S3 버킷명
@@ -92,22 +103,21 @@ class S3IDMatcher:
             파일 내용 (텍스트) 또는 None
         """
         try:
-            url = f"{self.collector_api}/api/repositories/s3/{bucket_name}/download"
-            params = {'key': file_key}
+            # boto3로 직접 S3에서 다운로드
+            import boto3
             
-            response = self.session.get(url, params=params, timeout=120)
-            response.raise_for_status()
+            s3_client = boto3.client('s3')
+            response = s3_client.get_object(Bucket=bucket_name, Key=file_key)
+            content = response['Body'].read()
             
-            # 텍스트 파일인 경우
-            content_type = response.headers.get('content-type', '')
-            if 'text' in content_type or 'json' in content_type or 'csv' in content_type:
-                return response.text
-            
-            # 바이너리 파일은 텍스트로 디코딩 시도
+            # 텍스트로 디코딩 시도
             try:
-                return response.content.decode('utf-8', errors='ignore')
-            except:
-                return response.content.decode('latin-1', errors='ignore')
+                return content.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    return content.decode('latin-1', errors='ignore')
+                except:
+                    return content.decode('utf-8', errors='ignore')
                 
         except Exception as e:
             print(f"[다운로드 실패] {bucket_name}/{file_key}: {e}")
@@ -116,42 +126,181 @@ class S3IDMatcher:
     def extract_ids_from_text(
         self,
         text: str,
-        target_ids: Set[int]
-    ) -> Set[int]:
+        target_ids: Set[int],
+        file_key: str = ""
+    ) -> Dict[str, Any]:
         """
         텍스트에서 특정 ID 패턴 추출
+        CSV/JSON 파일의 경우 'id' 컬럼/키의 값만 검색
         
         Args:
             text: 검색할 텍스트
             target_ids: 찾을 ID 집합
+            file_key: 파일명 (확장자 확인용)
         
         Returns:
-            발견된 ID 집합
+            {
+                'found_ids': Set[int],
+                'matches': [{'id': int, 'row_data': dict, 'row_number': int}]
+            }
         """
         if not text or not target_ids:
-            return set()
+            return {'found_ids': set(), 'matches': []}
         
         found_ids = set()
+        matches = []
         
-        # 모든 숫자 패턴 추출
-        numbers = re.findall(r'\b\d+\b', text)
-        
-        for num_str in numbers:
+        # CSV 파일 처리
+        if file_key.lower().endswith('.csv'):
             try:
-                num = int(num_str)
-                if num in target_ids:
-                    found_ids.add(num)
-            except ValueError:
-                continue
+                import csv
+                from io import StringIO
+                
+                # BOM 제거 (UTF-8 BOM 등)
+                if text.startswith('\ufeff'):
+                    text = text[1:]
+                    print(f"    [BOM 제거] UTF-8 BOM 발견 및 제거")
+                
+                # CSV 파싱
+                csv_reader = csv.DictReader(StringIO(text))
+                
+                # 헤더 확인
+                fieldnames = csv_reader.fieldnames
+                print(f"    [CSV 헤더] {fieldnames}")
+                
+                # id 컬럼 찾기 (대소문자 무시, 공백 제거)
+                id_column = None
+                if fieldnames:
+                    for field in fieldnames:
+                        if field and field.lower().strip() == 'id':
+                            id_column = field
+                            print(f"    [ID 컬럼 발견] '{id_column}'")
+                            break
+                
+                if not id_column:
+                    print(f"    [ID 컬럼 없음] CSV에 'id' 컬럼이 없어 검색 불가")
+                    return {'found_ids': set(), 'matches': []}
+                
+                # id 컬럼의 값 추출
+                row_count = 0
+                for row in csv_reader:
+                    row_count += 1
+                    id_value = row.get(id_column, '').strip()
+                    
+                    if id_value:
+                        try:
+                            num = int(id_value)
+                            if num in target_ids:
+                                found_ids.add(num)
+                                matches.append({
+                                    'id': num,
+                                    'row_data': dict(row),
+                                    'row_number': row_count,
+                                    'source': 'csv'
+                                })
+                                print(f"    [매칭] row {row_count}: id={num}")
+                        except (ValueError, TypeError):
+                            continue
+                
+                print(f"    [CSV 완료] {row_count}행 스캔, {len(found_ids)}개 ID 발견")
+                return {'found_ids': found_ids, 'matches': matches}
+                
+            except Exception as e:
+                print(f"    [CSV 파싱 실패] {e}")
+                import traceback
+                print(f"    {traceback.format_exc()}")
+                return {'found_ids': set(), 'matches': []}
         
-        return found_ids
+        # JSON 파일 처리
+        elif file_key.lower().endswith('.json'):
+            try:
+                import json as json_lib
+                
+                data = json_lib.loads(text)
+                print(f"    [JSON 파싱] 성공")
+                
+                # JSON 구조 분석
+                if isinstance(data, list):
+                    # 배열인 경우: [{"id": 1, ...}, {"id": 2, ...}]
+                    print(f"    [JSON 구조] 배열 ({len(data)}개 항목)")
+                    
+                    for idx, item in enumerate(data):
+                        if isinstance(item, dict) and 'id' in item:
+                            try:
+                                num = int(item['id'])
+                                if num in target_ids:
+                                    found_ids.add(num)
+                                    matches.append({
+                                        'id': num,
+                                        'row_data': item,
+                                        'row_number': idx + 1,
+                                        'source': 'json_array'
+                                    })
+                                    print(f"    [매칭] index {idx}: id={num}")
+                            except (ValueError, TypeError, KeyError):
+                                continue
+                
+                elif isinstance(data, dict):
+                    # 단일 객체인 경우: {"id": 1, ...}
+                    print(f"    [JSON 구조] 단일 객체")
+                    
+                    if 'id' in data:
+                        try:
+                            num = int(data['id'])
+                            if num in target_ids:
+                                found_ids.add(num)
+                                matches.append({
+                                    'id': num,
+                                    'row_data': data,
+                                    'row_number': 1,
+                                    'source': 'json_object'
+                                })
+                                print(f"    [매칭] id={num}")
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # 중첩된 배열 확인: {"data": [{"id": 1, ...}], ...}
+                    for key, value in data.items():
+                        if isinstance(value, list):
+                            print(f"    [JSON 구조] '{key}' 키 내 배열 ({len(value)}개 항목)")
+                            for idx, item in enumerate(value):
+                                if isinstance(item, dict) and 'id' in item:
+                                    try:
+                                        num = int(item['id'])
+                                        if num in target_ids:
+                                            found_ids.add(num)
+                                            matches.append({
+                                                'id': num,
+                                                'row_data': item,
+                                                'row_number': idx + 1,
+                                                'source': f'json_nested[{key}]'
+                                            })
+                                            print(f"    [매칭] {key}[{idx}]: id={num}")
+                                    except (ValueError, TypeError):
+                                        continue
+                
+                print(f"    [JSON 완료] {len(found_ids)}개 ID 발견")
+                return {'found_ids': found_ids, 'matches': matches}
+                
+            except json_lib.JSONDecodeError as e:
+                print(f"    [JSON 파싱 실패] {e}")
+                return {'found_ids': set(), 'matches': []}
+            except Exception as e:
+                print(f"    [JSON 처리 오류] {e}")
+                import traceback
+                print(f"    {traceback.format_exc()}")
+                return {'found_ids': set(), 'matches': []}
+        
+        # TXT 또는 기타 파일: 검색 안함
+        else:
+            print(f"    [파일 형식] CSV/JSON이 아니므로 검색 불가")
+            return {'found_ids': set(), 'matches': []}
     
     def search_id_in_file(
         self,
         bucket_name: str,
         file_key: str,
-        target_ids: Set[int],
-        context_length: int = 150
+        target_ids: Set[int]
     ) -> Dict[str, Any]:
         """
         특정 S3 파일에서 ID 검색
@@ -160,7 +309,6 @@ class S3IDMatcher:
             bucket_name: S3 버킷명
             file_key: 파일 키
             target_ids: 찾을 ID 집합
-            context_length: ID 주변 컨텍스트 길이
         
         Returns:
             매칭 결과
@@ -172,35 +320,23 @@ class S3IDMatcher:
                 'bucket': bucket_name,
                 'file_key': file_key,
                 'status': 'download_failed',
-                'found_ids': []
+                'found_ids': [],
+                'matches': []
             }
         
-        # ID 추출
-        found_ids = self.extract_ids_from_text(content, target_ids)
+        # ID 추출 (CSV/JSON의 경우 id 컬럼/키만)
+        result = self.extract_ids_from_text(content, target_ids, file_key)
+        found_ids = result['found_ids']
+        matches = result['matches']
         
         if not found_ids:
             return {
                 'bucket': bucket_name,
                 'file_key': file_key,
                 'status': 'no_match',
-                'found_ids': []
+                'found_ids': [],
+                'matches': []
             }
-        
-        # 각 ID의 컨텍스트 추출
-        matches = []
-        for found_id in found_ids:
-            pattern = rf'\b{found_id}\b'
-            for match in re.finditer(pattern, content):
-                start = max(0, match.start() - context_length)
-                end = min(len(content), match.end() + context_length)
-                context = content[start:end]
-                
-                matches.append({
-                    'id': found_id,
-                    'position': match.start(),
-                    'context': context,
-                    'line_number': content[:match.start()].count('\n') + 1
-                })
         
         return {
             'bucket': bucket_name,
@@ -209,7 +345,7 @@ class S3IDMatcher:
             'status': 'matched',
             'found_ids': sorted(found_ids),
             'matches': matches,
-            'total_occurrences': len(matches)
+            'total_id_count': len(found_ids)  # 고유 ID 개수
         }
     
     def scan_bucket(
@@ -217,7 +353,7 @@ class S3IDMatcher:
         bucket_name: str,
         target_ids: Set[int],
         file_extensions: Optional[List[str]] = None,
-        max_files: int = 100
+        max_files: int = 10000
     ) -> Dict[str, Any]:
         """
         S3 버킷 전체에서 ID 검색
@@ -253,10 +389,13 @@ class S3IDMatcher:
         
         # 파일 확장자 필터링
         if file_extensions:
-            filtered_files = [
-                f for f in files
-                if any(f['key'].lower().endswith(ext.lower()) for ext in file_extensions)
-            ]
+            filtered_files = []
+            for f in files:
+                # 다양한 키 형식 지원
+                file_key = f.get('Key') or f.get('key') or f.get('name', '')
+                if any(file_key.lower().endswith(ext.lower()) for ext in file_extensions):
+                    filtered_files.append(f)
+            
             print(f"[필터링] {len(files)}개 중 {len(filtered_files)}개 파일 선택 (확장자: {file_extensions})")
             files = filtered_files
         
@@ -266,8 +405,12 @@ class S3IDMatcher:
         found_ids_total = set()
         
         for file_info in files[:max_files]:
-            file_key = file_info.get('key', '')
-            file_size = file_info.get('size', 0)
+            # 다양한 키/크기 형식 지원
+            file_key = file_info.get('Key') or file_info.get('key') or file_info.get('name', '')
+            file_size = file_info.get('Size') or file_info.get('size', 0)
+            
+            if not file_key:
+                continue
             
             # 너무 큰 파일은 스킵 (10MB 이상)
             if file_size > 10 * 1024 * 1024:
@@ -286,20 +429,19 @@ class S3IDMatcher:
             if result['status'] == 'matched':
                 matched_files.append(result)
                 found_ids_total.update(result['found_ids'])
-                print(f"    ✓ 발견: {len(result['found_ids'])}개 ID, {result['total_occurrences']}회 출현")
+                print(f"    ✓ 발견: {len(result['found_ids'])}개 고유 ID - {sorted(result['found_ids'])}")
         
         print(f"\n[버킷 스캔 완료] {bucket_name}")
         print(f"  - 스캔한 파일: {scanned_count}개")
         print(f"  - 매칭된 파일: {len(matched_files)}개")
-        print(f"  - 발견된 ID: {len(found_ids_total)}개")
+        print(f"  - 발견된 고유 ID: {sorted(found_ids_total)}")
         
         return {
             'bucket': bucket_name,
             'status': 'completed',
             'scanned_files': scanned_count,
             'matched_files': matched_files,
-            'found_ids_summary': sorted(found_ids_total),
-            'total_matches': sum(f['total_occurrences'] for f in matched_files)
+            'found_ids_summary': sorted(found_ids_total)
         }
 
 
@@ -308,28 +450,10 @@ def search_ids_in_s3_via_collector(
     rds_ids: List[int],
     bucket_names: Optional[List[str]] = None,
     file_extensions: Optional[List[str]] = None,
-    max_files_per_bucket: int = 100
+    max_files_per_bucket: int = 10000
 ) -> Dict[str, Any]:
     """
     RDS ID를 Collector API를 통해 S3에서 검색
-    
-    Args:
-        collector_api: Collector API 주소
-        rds_ids: 검색할 RDS ID 리스트
-        bucket_names: 검색할 S3 버킷 목록 (None이면 전체)
-        file_extensions: 검색할 파일 확장자 (예: ['.csv', '.json', '.txt'])
-        max_files_per_bucket: 버킷당 최대 검색 파일 수
-    
-    Returns:
-        검색 결과
-    
-    예시:
-        result = search_ids_in_s3_via_collector(
-            collector_api="http://211.44.183.248:8000",
-            rds_ids=[3, 8, 20, 26, 33, 43, 52],
-            bucket_names=["my-data-bucket"],
-            file_extensions=['.csv', '.json']
-        )
     """
     print("="*70)
     print("=== S3에서 RDS ID 검색 시작 ===")
@@ -355,7 +479,11 @@ def search_ids_in_s3_via_collector(
     # S3 버킷 목록 조회
     if bucket_names is None:
         buckets = matcher.get_s3_buckets()
-        bucket_names = [b['name'] for b in buckets]
+        bucket_names = []
+        for b in buckets:
+            name = b.get('Name') or b.get('name')
+            if name:
+                bucket_names.append(name)
     
     if not bucket_names:
         print("[경고] 검색할 S3 버킷이 없습니다.")
@@ -434,150 +562,3 @@ def search_ids_in_s3_via_collector(
             'status': 'found' if all_found_ids else 'not_found'
         }
     }
-
-
-def search_rds_scan_result_in_s3(
-    collector_api: str,
-    rds_scan_result_path: str,
-    bucket_names: Optional[List[str]] = None,
-    file_extensions: Optional[List[str]] = None,
-    max_files_per_bucket: int = 100,
-    output_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    RDS 스캔 결과 파일을 읽어서 S3에서 검색
-    
-    Args:
-        collector_api: Collector API 주소
-        rds_scan_result_path: RDS 스캔 결과 JSON 파일 경로
-        bucket_names: 검색할 S3 버킷 목록 (None이면 전체)
-        file_extensions: 검색할 파일 확장자
-        max_files_per_bucket: 버킷당 최대 검색 파일 수
-        output_path: 결과 저장 경로 (None이면 저장 안함)
-    
-    Returns:
-        검색 결과
-    """
-    # RDS 스캔 결과 로드
-    rds_result_path = Path(rds_scan_result_path)
-    if not rds_result_path.exists():
-        return {
-            'error': f'RDS 스캔 결과 파일을 찾을 수 없습니다: {rds_scan_result_path}'
-        }
-    
-    try:
-        rds_result = json.loads(rds_result_path.read_text(encoding='utf-8'))
-    except Exception as e:
-        return {
-            'error': f'RDS 스캔 결과 파일 읽기 실패: {e}'
-        }
-    
-    # RDS 결과에서 원본 ID 추출
-    target_ids = set()
-    
-    # 단일 인스턴스 결과인 경우
-    if 'verification' in rds_result:
-        results_list = [rds_result]
-    # 여러 인스턴스 결과인 경우
-    elif 'results' in rds_result:
-        results_list = rds_result['results']
-    else:
-        return {'error': 'Invalid RDS scan result format'}
-    
-    # 모든 위반 ID 수집
-    for result in results_list:
-        verification = result.get('verification', {})
-        found_records = verification.get('found', [])
-        
-        for record in found_records:
-            original_id = record.get('original_id')
-            if original_id and isinstance(original_id, (int, str)):
-                try:
-                    target_ids.add(int(original_id))
-                except ValueError:
-                    continue
-    
-    if not target_ids:
-        print("[경고] RDS 스캔 결과에서 검증할 ID를 찾을 수 없습니다.")
-        return {
-            'error': 'RDS 스캔에서 위반 ID를 찾지 못했습니다.'
-        }
-    
-    # S3 검색 실행
-    result = search_ids_in_s3_via_collector(
-        collector_api=collector_api,
-        rds_ids=sorted(target_ids),
-        bucket_names=bucket_names,
-        file_extensions=file_extensions,
-        max_files_per_bucket=max_files_per_bucket
-    )
-    
-    # 결과 저장
-    if output_path:
-        output_file = Path(output_path)
-        output_file.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
-            encoding='utf-8'
-        )
-        print(f"\n[출력] 결과 저장: {output_file.resolve()}")
-    
-    return result
-
-
-# CLI 테스트
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="RDS ID를 S3에서 검색 (Collector API 사용)")
-    parser.add_argument("--collector", default="http://211.44.183.248:8000", help="Collector API 주소")
-    
-    # 검색 방법 1: ID 직접 입력
-    parser.add_argument("--ids", help="검색할 ID (쉼표 구분, 예: 3,8,20,26)")
-    
-    # 검색 방법 2: RDS 스캔 결과 파일 사용
-    parser.add_argument("--rds-result", help="RDS 스캔 결과 JSON 파일")
-    
-    # 공통 옵션
-    parser.add_argument("--buckets", help="검색할 S3 버킷 (쉼표 구분, 미지정시 전체)")
-    parser.add_argument("--extensions", help="파일 확장자 필터 (쉼표 구분, 예: .csv,.json)")
-    parser.add_argument("--max-files", type=int, default=100, help="버킷당 최대 검색 파일 수")
-    parser.add_argument("--output", default="s3_id_match_result.json", help="출력 파일")
-    
-    args = parser.parse_args()
-    
-    # 버킷 및 확장자 파싱
-    bucket_list = args.buckets.split(',') if args.buckets else None
-    ext_list = args.extensions.split(',') if args.extensions else None
-    
-    # 검색 실행
-    if args.rds_result:
-        # RDS 스캔 결과에서 ID 추출하여 검색
-        result = search_rds_scan_result_in_s3(
-            collector_api=args.collector,
-            rds_scan_result_path=args.rds_result,
-            bucket_names=bucket_list,
-            file_extensions=ext_list,
-            max_files_per_bucket=args.max_files,
-            output_path=args.output
-        )
-    elif args.ids:
-        # 직접 입력한 ID로 검색
-        rds_ids = [int(id.strip()) for id in args.ids.split(',')]
-        result = search_ids_in_s3_via_collector(
-            collector_api=args.collector,
-            rds_ids=rds_ids,
-            bucket_names=bucket_list,
-            file_extensions=ext_list,
-            max_files_per_bucket=args.max_files
-        )
-        
-        # 결과 저장
-        if args.output:
-            output_path = Path(args.output)
-            output_path.write_text(
-                json.dumps(result, ensure_ascii=False, indent=2),
-                encoding='utf-8'
-            )
-            print(f"\n[출력] 결과 저장: {output_path.resolve()}")
-    else:
-        parser.error("--ids 또는 --rds-result 중 하나는 필수입니다.")

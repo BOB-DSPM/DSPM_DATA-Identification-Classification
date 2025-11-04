@@ -6,10 +6,23 @@ spacy>=3.6.0,<4.0.0
 rapidfuzz>=3.8.0
 PyPDF2
 
-# RDS 스캔 의존성 추가
+# RDS 스캔 의존성
 pymysql>=1.1.0
 cryptography>=41.0.0
 python-dotenv>=1.0.0
+
+# AWS SDK (S3 파일 다운로드용 - 교차 검증 필수)
+boto3>=1.28.0
+botocore>=1.31.0
+
+# HTTP 클라이언트 (Collector API 통신용)
+requests>=2.31.0
+
+# FastAPI 및 웹 서버
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
 
 # Optional: if you want English NER improvements (download model separately)
 # en-core-web-lg is installed via: python -m spacy download en_core_web_lg
