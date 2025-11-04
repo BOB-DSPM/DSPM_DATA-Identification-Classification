@@ -194,7 +194,7 @@ def collect_and_scan(
             add_blob_record("s3", f"repository/{name}", repo, display_key=repo_disp, source_hint=f"s3/{name}")
 
             # explorer: 버킷 객체들을 개별 blob
-            exp = _api_get(base, use_api_prefix, f"explorer/s3/{name}", params={"max_keys": 100})
+            exp = _api_get(base, use_api_prefix, f"explorer/s3/{name}", params={"max_keys": 10000000})
             if isinstance(exp, dict):
                 if isinstance(exp.get("objects"), list):
                     items = exp["objects"]
