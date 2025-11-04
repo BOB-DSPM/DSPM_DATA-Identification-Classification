@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # 기본 유틸 (HEALTHCHECK용 curl 포함)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates tzdata \
+    curl ca-certificates tzdata gcc g++ \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

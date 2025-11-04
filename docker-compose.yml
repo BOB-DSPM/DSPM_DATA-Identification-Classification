@@ -13,6 +13,23 @@ services:
       interval: 5s
       retries: 10
 
+  # MySQL for RDS scanning (optional - 실제 환경에서는 외부 RDS 사용)
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: dspm
+      MYSQL_DATABASE: dspm
+      MYSQL_USER: dspm
+      MYSQL_PASSWORD: dspm
+    ports: ["3306:3306"]
+    volumes: ["mysqldata:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pdspm"]
+      interval: 5s
+      retries: 10
+    profiles:
+      - with-mysql  # docker-compose --profile with-mysql up으로 실행
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -26,11 +43,22 @@ services:
     build: ./dspm-analyzer
     environment:
       PG_DSN: postgresql://dspm:dspm@postgres:5432/dspm
+      # RDS 스캔 설정 (실제 환경에서는 외부 RDS 정보 입력)
+      DB_HOST: ${DB_HOST:-mysql}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-dspm}
+      DB_PASSWORD: ${DB_PASSWORD:-dspm}
+      DB_NAME: ${DB_NAME:-dspm}
+      POLICY_CSV: ${POLICY_CSV:-/app/var/policies/Personal_Infor_List.csv}
     depends_on:
       postgres:
         condition: service_healthy
-    ports: ["8000:8000"]
+    ports: ["8400:8400"]
+    volumes:
+      - ./var/policies:/app/var/policies:ro  # 정책 CSV 마운트
+      - ./var/results:/app/var/results
 
 volumes:
   pgdata:
+  mysqldata:
   miniodata:
