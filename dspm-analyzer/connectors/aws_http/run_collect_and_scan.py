@@ -194,7 +194,7 @@ def collect_and_scan(
             add_blob_record("s3", f"repository/{name}", repo, display_key=repo_disp, source_hint=f"s3/{name}")
 
             # explorer: 버킷 객체들을 개별 blob
-            exp = _api_get(base, use_api_prefix, f"explorer/s3/{name}", params={"max_keys": 10000000})
+            exp = _api_get(base, use_api_prefix, f"explorer/s3/{name}", params={"max_keys": 200})
             if isinstance(exp, dict):
                 if isinstance(exp.get("objects"), list):
                     items = exp["objects"]
@@ -458,7 +458,7 @@ def collect_and_scan(
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser(description="Collect from AWS HTTP Collector and scan with main.py pipeline")
-    p.add_argument("--api", required=True, help="Collector base url (e.g., http://192.168.0.10:8000 or .../explorer)")
+    p.add_argument("--api", required=True, help="Collector base url (e.g., http://http://211.44.183.248:8000 or .../explorer)")
     p.add_argument("--services", default="", help="Comma-separated services (e.g., s3,dynamodb). Empty=all")
     p.add_argument("--out", default="results_all.json", help="Output result json")
     p.add_argument("--dump-dir", default="", help="(optional) Directory to dump raw collected payloads")
