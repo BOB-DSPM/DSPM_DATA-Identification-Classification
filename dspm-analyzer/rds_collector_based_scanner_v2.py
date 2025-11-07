@@ -602,7 +602,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Collector 기반 RDS 익명화 스캐너 v2")
-    parser.add_argument("--collector", default="http://211.44.183.248:8000", help="Collector API 주소")
+    parser.add_argument("--collector", default="http://43.202.228.52:8000", help="Collector API 주소")
     parser.add_argument("--db-ids", help="스캔할 RDS ID (쉼표 구분, 없으면 전체)")
     parser.add_argument("--user", default="madeit", help="기본 사용자명")
     parser.add_argument("--password", default="madeit1022!", help="기본 비밀번호")

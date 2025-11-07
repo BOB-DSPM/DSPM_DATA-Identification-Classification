@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional
 
 # 기본 설정
 DEFAULT_ANALYZER_HOST = "http://127.0.0.1:9000"
-DEFAULT_COLLECTOR_HOST = "http://211.44.183.248:8000"
+DEFAULT_COLLECTOR_HOST = "http://43.202.228.52:8000"
 
 DEFAULT_RDS_CONFIG = {
     'host': os.getenv('RDS_HOST', 'localhost'),

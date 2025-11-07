@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+#main.py (AI 통합 버전)
 import os, re, io, csv, json
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
@@ -13,7 +14,7 @@ POLICY_CSV = os.getenv(
 MATCH_SCOPE = os.getenv("MATCH_SCOPE", "key").lower()
 
 # =========================================================
-# Presidio 준비(선택)
+# Presidio 준비 (AI로 대체)
 # =========================================================
 ENGINE_PII_AVAILABLE = False
 SPLIT_BY_ENTITY = True
@@ -21,23 +22,57 @@ try:
     from engine_pii import analyze_text as _presidio_analyze_text
     from engine_pii import list_loaded_recognizers as _presidio_list_loaded
     ENGINE_PII_AVAILABLE = True
-    print("[info] Presidio: ON (engine_pii.analyze_text 사용)")
+    print("[info] AI PII Engine: ON (http://211.44.183.248:8900/infer)")
 except Exception as e:
-    print(f"[warn] Presidio import 실패: {e}  -> Presidio 결과는 비게 나올 수 있습니다.")
+    print(f"[warn] AI Engine import 실패: {e}")
 
 # 정책/출력 설정
 TREAT_CREDIT_CARD_AS_SENSITIVE = bool(int(os.getenv("TREAT_CREDIT_CARD_AS_SENSITIVE", "0")))
 CLASSIFY_ROOT = "classified"
-DEBUG_UNMASK = bool(int(os.getenv("DEBUG_UNMASK", "0")))  # 콘솔 마스킹 해제
+DEBUG_UNMASK = bool(int(os.getenv("DEBUG_UNMASK", "0")))
 
 # =========================================================
-# 1) 패턴/힌트
+# AI 라벨 매핑 (NEW)
+# =========================================================
+# AI가 반환하는 라벨을 내부 엔티티명으로 정규화
+AI_LABEL_MAP = {
+    "NAME": "KR_NAME",
+    "B-NAME": "KR_NAME",
+    "I-NAME": "KR_NAME",
+    "PHONE": "PHONE_NUMBER",
+    "B-PHONE": "PHONE_NUMBER",
+    "I-PHONE": "PHONE_NUMBER",
+    "EMAIL": "EMAIL_ADDRESS",
+    "B-EMAIL": "EMAIL_ADDRESS",
+    "I-EMAIL": "EMAIL_ADDRESS",
+    "ADDRESS": "KOREAN_ADDRESS",
+    "B-ADDRESS": "KOREAN_ADDRESS",
+    "I-ADDRESS": "KOREAN_ADDRESS",
+    "DOB": "DATE_OF_BIRTH",
+    "B-DOB": "DATE_OF_BIRTH",
+    "I-DOB": "DATE_OF_BIRTH",
+    "RRN_KR": "KR_RRN",
+    "B-RRN_KR": "KR_RRN",
+    "I-RRN_KR": "KR_RRN",
+}
+
+# =========================================================
+# 엔티티 분류 (AI 라벨 추가)
+# =========================================================
+ID_ENTS = {"KR_RRN", "KR_FRN", "KR_PASSPORT", "KR_DRIVER_LICENSE"}
+PIPA_ENTS = {"KOREAN_PIPA_POLITICAL", "KOREAN_PIPA_UNION", "KOREAN_PIPA_HEALTH", "KOREAN_PIPA_SEX_LIFE", "KOREAN_PIPA_BELIEF"}
+GENERAL_PII = {
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "IP_ADDRESS", "CREDIT_CARD", 
+    "KOREAN_ADDRESS", "KR_BANK_ACCOUNT", "DATE_OF_BIRTH", 
+    "CARD_CVV", "CARD_EXPIRY", "CARD_ISSUER", "KR_NAME", "KR_NAME_ROMA"
+}
+
+# =========================================================
+# 1) 패턴/힌트 (기존 유지)
 # =========================================================
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
 CC_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
 RRN_RE = re.compile(r"(?<!\d)(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-]?[1-4]\d{6}(?!\d)")
-
-# 전화번호: +82 또는 0 접두 필수
 PHONE_RE = re.compile(
     r"(?<!\d)"
     r"(?:\+82[-.\s]?0?|0)"
@@ -45,18 +80,13 @@ PHONE_RE = re.compile(
     r"[-.\s]?\d{3,4}[-.\s]?\d{4}"
     r"(?!\d)"
 )
-
-# ICD-10 (헤더 기반 + 평문 의료 문맥에서만)
 ICD10_RE = re.compile(r"\b([A-TV-Z][0-9]{2}(?:\.[0-9A-TV-Z]{1,4})?)\b", re.I)
-
-# 카드 결제 요소
 EXPIRY_RE = re.compile(r"\b(0?[1-9]|1[0-2])[/\-](?:\d{2}|\d{4})\b")
-CVV_RE    = re.compile(r"\b\d{3,4}\b")
+CVV_RE = re.compile(r"\b\d{3,4}\b")
 CVV_LABEL_RE = re.compile(
     r"(?:CVV|CVC|카드\s*보안코드)(?:\s*\([^)]+\))?\s*[:\-]?\s*([0-9]{3,4})\b",
     re.I
 )
-# CSV 셀형(값만 있는 경우) CVV 후보
 CVV_CSV_CELL_RE = re.compile(r"^\s*\d{3,4}\s*$")
 
 CARD_CONTEXT = (
@@ -64,7 +94,6 @@ CARD_CONTEXT = (
     "discover","diners","jcb","카드","신용카드","체크카드","카드번호","결제카드","결제","승인","결제번호"
 )
 
-# 주소/계좌/DOB
 KOREAN_ADDRESS_RE = re.compile(r"""
 \b(
  (?:서울|부산|대구|인천|광주|대전|울산|세종|제주|경기|강원|충북|충남|전북|전남|경북|경남)
@@ -78,7 +107,6 @@ KOREAN_ADDRESS_RE = re.compile(r"""
 \b
 """, re.VERBOSE)
 
-# 계좌: 평문 비활성(헤더 열에서만). 하이픈(일반/긴 대시) 통일 매칭.
 HYPH = r"[-\u2013\u2014\u2015\u2012\u2011\u2010]"
 BANK_ACCOUNT_HYPHEN_RE = re.compile(
     rf"(?<!\d)(?:\d{{1,4}}{HYPH}\d{{1,6}}(?:{HYPH}\d{{1,6}})+)(?!\d)"
@@ -93,40 +121,34 @@ DOB_RES = [
     re.compile(r"\b([0-9]{2})([01][0-9])([0-3][0-9])\b"),
 ]
 
-# ===== 헤더 힌트(동의어 확장) =====
+# 헤더 힌트
 ICD10_HEADER_HINTS = [
     "icd10","icd_10","diagnosis_code","diagnosis_code_icd10",
     "icd","dx","diag","진단","진단코드","상병","상병코드",
     "diagnosis","diagnosiscode","icdcode"
 ]
 CARD_NUMBER_HEADER_HINTS = ["card","card_number","pan","acct","account_number","cardnumber","card no","cardno"]
-CARD_EXPIRY_HEADER_HINTS  = ["exp","expiry","expiration","exp_date","valid_thru","valid_until","expires"]
-CARD_CVV_HEADER_HINTS     = ["cvv","cvc","cid","csc","security_code","card_cvv","cvv_code"]
-CARD_ISSUER_HEADER_HINTS  = ["card_issuer","issuer","brand","scheme"]
-ADDRESS_HEADER_HINTS      = ["address","주소","배송지","거주지","도로명","지번","billing_address","address_road"]
+CARD_EXPIRY_HEADER_HINTS = ["exp","expiry","expiration","exp_date","valid_thru","valid_until","expires"]
+CARD_CVV_HEADER_HINTS = ["cvv","cvc","cid","csc","security_code","card_cvv","cvv_code"]
+CARD_ISSUER_HEADER_HINTS = ["card_issuer","issuer","brand","scheme"]
+ADDRESS_HEADER_HINTS = ["address","주소","배송지","거주지","도로명","지번","billing_address","address_road"]
 BANK_ACCOUNT_HEADER_HINTS = [
     "bank","bank_account","account_no","acct","계좌","계좌번호","입금",
     "accountnumber","bankaccount","acct_no","accountno"
 ]
-DOB_HEADER_HINTS          = ["dob","date_of_birth","dateofbirth","birth","생년월일","출생","출생일"]
-NAME_HEADER_HINTS         = [
+DOB_HEADER_HINTS = ["dob","date_of_birth","dateofbirth","birth","생년월일","출생","출생일"]
+NAME_HEADER_HINTS = [
     "name","full_name","first_name","last_name","name_ko","holder_name","cardholder","patient_name",
     "성명","이름","담당자","작성자","등록자","신청자","수신자","보낸이","받는이","대표","담당","기안자","승인자","검토자"
 ]
-ID_HEADER_HINTS_RRN       = ["rrn","resident_registration","주민등록","주민번호","주민등록번호"]
-ID_HEADER_HINTS_FRN       = ["frn","foreigner_registration","외국인등록","외국인등록번호","외국인"]
-ID_HEADER_HINTS_PPT       = ["passport","passport_no","passport_number","여권","여권번호"]
-ID_HEADER_HINTS_DL        = ["driver","driver_license","license_no","dl_number","운전면허","면허번호"]
+ID_HEADER_HINTS_RRN = ["rrn","resident_registration","주민등록","주민번호","주민등록번호"]
+ID_HEADER_HINTS_FRN = ["frn","foreigner_registration","외국인등록","외국인등록번호","외국인"]
+ID_HEADER_HINTS_PPT = ["passport","passport_no","passport_number","여권","여권번호"]
+ID_HEADER_HINTS_DL = ["driver","driver_license","license_no","dl_number","운전면허","면허번호"]
 
-# 라우팅 판단용 엔티티
-ID_ENTS = {"KR_RRN","KR_FRN","KR_PASSPORT","KR_DRIVER_LICENSE"}
-PIPA_ENTS = {"KOREAN_PIPA_POLITICAL","KOREAN_PIPA_UNION","KOREAN_PIPA_HEALTH","KOREAN_PIPA_SEX_LIFE","KOREAN_PIPA_BELIEF"}
-GENERAL_PII = {"EMAIL_ADDRESS","PHONE_NUMBER","IP_ADDRESS","CREDIT_CARD","KOREAN_ADDRESS","KR_BANK_ACCOUNT","DATE_OF_BIRTH","CARD_CVV","CARD_EXPIRY","CARD_ISSUER", "KR_NAME","KR_NAME_ROMA"}
-
-# 파일명 위험 힌트
-HINTS_SENSITIVE   = ["political","union","religion","belief","sex","health","medical","diagnosis","patient","pregnancy"]
+HINTS_SENSITIVE = ["political","union","religion","belief","sex","health","medical","diagnosis","patient","pregnancy"]
 HINTS_IDENTIFIERS = ["passport","rrn","resident_registration","driver","license","idcard","national_id","ssn"]
-HINTS_PII         = ["pii","private","confidential","secret","customer","user","account"]
+HINTS_PII = ["pii","private","confidential","secret","customer","user","account"]
 
 # =========================================================
 # 2) 유틸/마스킹
@@ -137,10 +159,6 @@ def _safe_key_filename(orig_key: str) -> str:
     return safe.strip("/")
 
 def _key_stem_lower(key: str) -> Optional[str]:
-    """
-    S3 key에서 확장자를 제거한 파일명(stem)을 소문자로 반환.
-    예) 'folder/a.csv' -> 'a', 'health_dataset.csv' -> 'health_dataset'
-    """
     if not key:
         return None
     base = os.path.basename(str(key))
@@ -172,7 +190,6 @@ def _mask_pan(s: str) -> str:
     return f"{'*'*(len(d)-4)}{d[-4:]}"
 
 def _mask_values_for_console(values: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    # 마스킹 해제 
     return values
 
 def _norm_hyphen(s: str) -> str:
@@ -201,29 +218,23 @@ def _try_parse_dt(s: str):
     if not s:
         return None
     s = str(s).strip()
-    # ISO 8601 with Z
     if s.endswith("Z"):
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))
         except Exception:
             pass
-    # plain ISO 8601
     try:
-        
         dt = datetime.fromisoformat(s)
-        # *** 수정: timezone이 없으면 UTC 부여 ***
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
     except Exception:
         pass
-    # common formats
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
                 "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d",
                 "%Y-%m-%dT%H:%M:%S"):
         try:
             dt = datetime.strptime(s, fmt)
-            # *** timezone이 없으면 UTC 부여 ***
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
@@ -249,22 +260,15 @@ def _hdr_any(header_raw: str, hints: List[str]) -> bool:
 _TOKEN_SPLIT_RE = re.compile(r"[^\w@.+-]+", re.UNICODE)
 
 def _filename_tokens(key: str) -> List[str]:
-    """
-    파일 경로에서 파일명(basename)과 마지막 2~3개 디렉터리명을 추려
-    토큰 단위로 분해하여 반환.
-    - 이메일/도메인/연월일/ID 등이 토큰으로 남도록 @ . + - 는 유지
-    - 너무 긴 숫자 나열은 scan_text_values_all의 필터(카드/전화/생년월일 문맥)에서 걸러짐
-    """
     if not key:
         return []
     parts = [p for p in key.strip("/").split("/") if p]
-    tail = parts[-3:] if len(parts) >= 3 else parts  # 마지막 3개 세그먼트만
+    tail = parts[-3:] if len(parts) >= 3 else parts
     toks: List[str] = []
     for seg in tail:
         for t in _TOKEN_SPLIT_RE.split(seg):
             if t:
                 toks.append(t)
-    # 중복 제거(순서 유지)
     return list(dict.fromkeys(toks))
 
 def _derive_source_label(key: str) -> Optional[str]:
@@ -288,7 +292,6 @@ def _derive_source_label(key: str) -> Optional[str]:
         return f"{svc}/{ident}"
     return None
 
-# ── 경로에서 날짜(YYYY[/MM[/DD]]) 추론 ─────────────────────
 _DATE_PATTERNS = [
     re.compile(r"(?P<y>20\d{2}|19\d{2})[/-](?P<m>0[1-9]|1[0-2])[/-](?P<d>0[1-9]|[12]\d|3[01])"),
     re.compile(r"(?P<y>20\d{2}|19\d{2})[/-](?P<m>0[1-9]|1[0-2])"),
@@ -309,7 +312,7 @@ def _parse_date_from_key(key: str) -> Optional[datetime]:
                 pass
     return None
 
-# ── 정책 인덱스 전역 초기화 ──────────────────────────────
+# 정책 인덱스
 try:
     from policies.loader import load_policies
     from matcher.bucket_match import build_policy_slug_index, map_bucket_to_policy
@@ -322,7 +325,6 @@ _POLICIES: List[Any] = []
 slug_index: Dict[str, Any] = {}
 
 def _init_policy_index():
-    """POLICY_CSV에서 정책을 읽어 1회 전역 인덱스 구축"""
     global _POLICIES, slug_index
     if slug_index or not load_policies or not build_policy_slug_index:
         return
@@ -346,7 +348,6 @@ def _extract_bucket(key: str):
         s = s[5:]
     elif s.startswith("s3/"):
         s = s[3:]
-    # 첫 세그먼트가 버킷. 슬래시 없으면 매핑하지 않음
     return s.split("/", 1)[0] if "/" in s else None
 
 # =========================================================
@@ -382,7 +383,7 @@ def looks_like_csv(text: str) -> bool:
     return ok >= max(1, len(check_lines) // 2)
 
 # =========================================================
-# 4) 평문 스캔 — 계좌 평문 비활성, ICD10은 의료 문맥에서만
+# 4) 평문 스캔 (룰 기반 - 폴백용)
 # =========================================================
 ICD10_PLAIN_CONTEXT = (
     "diagnosis","diagnoses","icd","icd-10","icd10","상병","상병코드",
@@ -403,6 +404,7 @@ def _extract_icd10_in_plain(s: str) -> List[str]:
     return hits
 
 def scan_text_values_all(s: str) -> Dict[str, List[str]]:
+    """룰 기반 폴백 스캔 (AI가 실패했을 때만 사용)"""
     vals: Dict[str, List[str]] = {}
     if not s: return vals
     s = _norm_hyphen(s)
@@ -442,11 +444,10 @@ def scan_text_values_all(s: str) -> Dict[str, List[str]]:
     if icd_hits:
         ensure_list(vals, "ICD10_CODE"); vals["ICD10_CODE"].extend(icd_hits)
 
-    # 계좌 평문 비활성
     return vals
 
 # =========================================================
-# 5) 헤더 기반 스캔 (CSV 셀 단위)
+# 5) 헤더 기반 스캔
 # =========================================================
 def _looks_like_kr_name(v: str) -> bool:
     v = (v or "").strip()
@@ -467,12 +468,12 @@ def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
     h = _norm_header(h_raw)
     v = _norm_hyphen(str(value).strip())
 
-    # 1) 기본 평문 스캔
+    # 1) 기본 평문 스캔 (폴백)
     base = scan_text_values_all(v)
     for k, arr in base.items():
         ensure_list(out, k); out[k].extend(arr)
 
-    # 2) ICD-10: 헤더 힌트가 있을 때만 적극
+    # 2) ICD-10
     if _hdr_any(h_raw, ICD10_HEADER_HINTS):
         email_spans = _spans(EMAIL_RE, v)
         for mm in ICD10_RE.finditer(v.upper()):
@@ -483,15 +484,12 @@ def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
             if "@" in v[max(0, mm.start()-2): min(len(v), mm.end()+2)]:
                 continue
             ensure_list(out, "ICD10_CODE"); out["ICD10_CODE"].append(code)
-    else:
-        # 평문 문맥으로 잡힌 것만 유지
-        pass
 
-    # 3) 카드/계좌는 헤더 열에서만 인정
+    # 3) 카드/계좌 (헤더 기반)
     is_card_num_col = _hdr_any(h_raw, CARD_NUMBER_HEADER_HINTS)
-    is_cvv_col      = _hdr_any(h_raw, CARD_CVV_HEADER_HINTS)
-    is_exp_col      = _hdr_any(h_raw, CARD_EXPIRY_HEADER_HINTS)
-    is_bank_col     = _hdr_any(h_raw, BANK_ACCOUNT_HEADER_HINTS)
+    is_cvv_col = _hdr_any(h_raw, CARD_CVV_HEADER_HINTS)
+    is_exp_col = _hdr_any(h_raw, CARD_EXPIRY_HEADER_HINTS)
+    is_bank_col = _hdr_any(h_raw, BANK_ACCOUNT_HEADER_HINTS)
 
     if is_card_num_col:
         if CC_CANDIDATE_RE.search(v) and luhn_valid(v):
@@ -520,7 +518,7 @@ def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
     if is_bank_col and "KR_BANK_ACCOUNT" in out and "CREDIT_CARD" in out:
         out.pop("CREDIT_CARD", None)
 
-    # 4) 고유식별정보(헤더 기반)
+    # 4) 고유식별정보
     if _hdr_any(h_raw, ID_HEADER_HINTS_RRN):
         for m in re.finditer(r"(?<!\d)(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-]?[1-4]\d{6}(?!\d)", v):
             ensure_list(out, "KR_RRN"); out["KR_RRN"].append(m.group(0))
@@ -534,7 +532,7 @@ def scan_value_with_header(header: str, value: str) -> Dict[str, List[str]]:
         for m in re.finditer(r"(?<!\d)\d{2}-\d{2}-\d{6}-\d{2}(?!\d)", v):
             ensure_list(out, "KR_DRIVER_LICENSE"); out["KR_DRIVER_LICENSE"].append(m.group(0))
 
-    # 5) 주소/DOB/이름: 헤더 힌트 있으면 적극
+    # 5) 주소/DOB/이름
     if _hdr_any(h_raw, ADDRESS_HEADER_HINTS):
         m = KOREAN_ADDRESS_RE.search(v)
         if m:
@@ -562,13 +560,11 @@ def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
     key = str(blob.get("key",""))
     vals: Dict[str, List[str]] = {}
 
-    # 기존: key/last_modified/size 문자열에서 평문 패턴 스캔(과도탐지 거의 없음)
     for field in ("key","last_modified","size"):
         found = scan_text_values_all(str(blob.get(field,"")))
         for k, arr in found.items():
             ensure_list(vals,k); vals[k].extend(arr)
 
-    # 기존: metadata/tags/labels 딕셔너리 키/값도 스캔
     for field in ("metadata","tags","labels"):
         md = blob.get(field)
         if isinstance(md, dict):
@@ -578,18 +574,13 @@ def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
                 for k, arr in scan_text_values_all(str(mv)).items():
                     ensure_list(vals,k); vals[k].extend(arr)
 
-    # NEW: 파일명/경로 토큰을 본문처럼 실제 패턴으로 스캔
-    # - basename 뿐 아니라 마지막 2~3 세그먼트까지 커버
-    # - EMAIL/PHONE/RRN 등 실제 정규식에 '정답'이 나와야만 잡힘
     fname_tokens = _filename_tokens(key)
     if fname_tokens:
-        # 토큰 각각을 개별 텍스트로 간주하여 스캔
         for tok in fname_tokens:
             found = scan_text_values_all(tok)
             for k, arr in found.items():
                 ensure_list(vals,k); vals[k].extend(arr)
 
-        # 토큰을 공백 결합해 한 번 더 스캔 (예: john.doe+id-010-1234-5678.txt 같은 케이스)
         joined = " ".join(fname_tokens)
         found_joined = scan_text_values_all(joined)
         for k, arr in found_joined.items():
@@ -598,7 +589,7 @@ def scan_metadata(blob: Dict[str,Any]) -> Dict[str,Any]:
     return {"values": vals}
 
 # =========================================================
-# 7) CSV/Plain 스캐너
+# 7) CSV/Plain 스캐너 (AI 통합)
 # =========================================================
 def detect_in_csv_text(text: str) -> Dict[str, Any]:
     normalized = text.replace("\r\n","\n").replace("\r","\n")
@@ -611,14 +602,13 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
     rows_scanned = 0
     reader = csv.DictReader(io.StringIO(normalized), dialect=dialect)
 
-    # created_at 후보 헤더(소문자/정규화)
     CREATED_AT_HEADER_HINTS = [
         "created_at", "created", "ingested_at", "uploaded_at", "last_modified",
         "생성일", "업로드일", "등록일", "기준일자", "기준일", "작성일"
     ]
 
-    csv_row_created: List[Dict[str, Any]] = []   # 행별 created_at만 보관
-    rows_detail: List[Dict[str, Any]] = [] 
+    csv_row_created: List[Dict[str, Any]] = []
+    rows_detail: List[Dict[str, Any]] = []
 
     fieldnames = [fn or "" for fn in (reader.fieldnames or [])]
     def _is_created_col(h: str) -> bool:
@@ -628,29 +618,19 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
 
     created_header_keys = [h for h in fieldnames if _is_created_col(h)]
 
-    # *** 디버깅 출력 추가 ***
-    print(f"[DEBUG CSV] 헤더: {fieldnames}")
-    print(f"[DEBUG CSV] created_at 매칭된 헤더: {created_header_keys}")
-
     for row_no, row in enumerate(reader, start=2):
         rows_scanned += 1
-
-        # (A) 이 행의 엔티티만 모으는 딕셔너리 (행 단위)
         row_entities: Dict[str, List[str]] = {}
 
-        # (B) 값/엔티티 스캔 — 전체 합산(values) + 행 단위(row_entities) 모두 채움
         for col, raw in (row or {}).items():
             if raw is None:
                 continue
             found = scan_value_with_header(str(col), str(raw))
-            # 전체 합산
             for k, arr in found.items():
                 ensure_list(values, k); values[k].extend(arr)
-            # 행 단위
             for k, arr in found.items():
                 ensure_list(row_entities, k); row_entities[k].extend(arr)
 
-        # (C) created_at 추출 (이 행)
         created_iso = None
         if created_header_keys:
             for col in created_header_keys:
@@ -663,12 +643,10 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
                     csv_row_created.append({"row": row_no, "created_at": created_iso})
                     break
 
-        # (D) 행 단위 결과에 저장 (원본 행 일부도 함께 담아두면 디버깅/알림문에 사용 가능)
         rows_detail.append({
             "row": row_no,
             "created_at": created_iso,
             "entities": row_entities,
-            # 필요시 식별에 쓸 주요 컬럼들을 일부만 보관:
             "row_key_fields": {
                 "health_id": row.get("health_id"),
                 "name_ko": row.get("name_ko"),
@@ -680,7 +658,7 @@ def detect_in_csv_text(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "rows_scanned": rows_scanned,
         "values_text": values,
-        "rows_detail": rows_detail,    
+        "rows_detail": rows_detail,
     }
     if csv_row_created:
         out["csv_row_created"] = csv_row_created
@@ -691,50 +669,81 @@ def detect_in_plain_text(text: str) -> Dict[str, Any]:
     return {"values": scan_text_values_all(text)}
 
 # =========================================================
-# 8) Presidio 실행 + 병합(보수적)
+# 8) AI 실행 + 병합 (NEW)
 # =========================================================
-def run_presidio(texts: List[str]) -> List[Dict[str,Any]]:
-    if not ENGINE_PII_AVAILABLE: return []
+def run_ai_pii(texts: List[str]) -> List[Dict[str,Any]]:
+    """AI PII 탐지 실행"""
+    if not ENGINE_PII_AVAILABLE: 
+        print("[warn] AI Engine 비활성: 룰 기반으로 폴백")
+        return []
+    
     hits: List[Dict[str,Any]] = []
     for t in texts:
+        if not t or len(t.strip()) == 0:
+            continue
         try:
-            d = _presidio_analyze_text(t)
-            hits.extend(d.get("merged", []))
+            result = _presidio_analyze_text(t)
+            merged = result.get("merged", [])
+            hits.extend(merged)
         except Exception as e:
-            print(f"[warn] Presidio 오류: {e}")
+            print(f"[warn] AI 분석 오류: {e}")
+    
     return hits
 
-def _merge_presidio_hits_into_findings(findings: Dict[str,Any], hits: List[Dict[str,Any]], *, is_csv: bool = False):
-    if not hits: return
+def _normalize_ai_label(label: str) -> str:
+    """AI 라벨을 내부 엔티티명으로 정규화"""
+    return AI_LABEL_MAP.get(label, label)
+
+def _merge_ai_hits_into_findings(findings: Dict[str,Any], hits: List[Dict[str,Any]], *, is_csv: bool = False):
+    """AI 탐지 결과를 findings에 병합"""
+    if not hits: 
+        return
+    
     tgt = findings.get("values_text") or findings.get("values") or findings.get("json_values")
-    if not isinstance(tgt, dict): return
-    icd10_rx = re.compile(r"^[A-TV-Z][0-9]{2}(?:\.[0-9A-TV-Z]{1,4})?$", re.I)
+    if not isinstance(tgt, dict): 
+        return
 
     for h in hits:
-        ent = (h.get("entity") or "").upper()
+        raw_ent = (h.get("entity") or "").upper()
         txt = h.get("text") or ""
-        if not txt: continue
-
-        if ent in ("KR_NAME", "KR_NAME_ROMA"):
+        if not txt: 
             continue
-        if ent == "KOREAN_ADDRESS":
-            ensure_list(tgt, "KOREAN_ADDRESS"); tgt["KOREAN_ADDRESS"].append(txt)
-        elif ent == "KR_BANK_ACCOUNT":
-            # 계좌는 헤더 기반에서만: 기본 미병합
-            pass
-        elif icd10_rx.match(txt):
-            ensure_list(tgt, "ICD10_CODE"); tgt["ICD10_CODE"].append(txt.upper())
+
+        # AI 라벨 정규화
+        normalized_ent = _normalize_ai_label(raw_ent)
+        
+        # 엔티티별 처리
+        if normalized_ent == "KR_NAME":
+            if _looks_like_kr_name(txt):
+                ensure_list(tgt, "KR_NAME")
+                tgt["KR_NAME"].append(txt)
+        elif normalized_ent == "PHONE_NUMBER":
+            if _is_plausible_kr_phone(txt):
+                ensure_list(tgt, "PHONE_NUMBER")
+                tgt["PHONE_NUMBER"].append(txt)
+        elif normalized_ent == "EMAIL_ADDRESS":
+            if EMAIL_RE.match(txt):
+                ensure_list(tgt, "EMAIL_ADDRESS")
+                tgt["EMAIL_ADDRESS"].append(txt)
+        elif normalized_ent == "KOREAN_ADDRESS":
+            ensure_list(tgt, "KOREAN_ADDRESS")
+            tgt["KOREAN_ADDRESS"].append(txt)
+        elif normalized_ent == "DATE_OF_BIRTH":
+            ensure_list(tgt, "DATE_OF_BIRTH")
+            tgt["DATE_OF_BIRTH"].append(txt)
+        elif normalized_ent == "KR_RRN":
+            ensure_list(tgt, "KR_RRN")
+            tgt["KR_RRN"].append(txt)
+        else:
+            # 기타 엔티티는 그대로 추가
+            ensure_list(tgt, normalized_ent)
+            tgt[normalized_ent].append(txt)
 
 # =========================================================
-# 9) 분류 로직
+# 9) 분류 로직 (AI 라벨 지원)
 # =========================================================
 def _bucket_for_entity(ent: str) -> str:
-    """
-    PIPA 기준 버킷 매핑:
-      - 민감정보(sensitive): 건강/신념/정치/노조/성생활 등
-      - 고유식별(identifiers): 주민번호/외국인등록/여권/운전면허
-      - 그 외 개인정보(public): 이메일/전화/주소/카드/계좌/생년월일/CVV 등
-    """
+    """엔티티 분류 (AI 라벨 포함)"""
     ent = (ent or "").upper()
 
     # PIPA 민감정보
@@ -745,7 +754,7 @@ def _bucket_for_entity(ent: str) -> str:
     if ent in ID_ENTS:
         return "identifiers"
 
-    # 나머지 
+    # 일반 개인정보
     return "public"
 
 def build_target_path(category: str, key: str) -> str:
@@ -755,36 +764,28 @@ def build_target_path(category: str, key: str) -> str:
 
 def decide_category(meta: Dict[str,Any],
                     findings: Dict[str,Any],
-                    presidio_hits: List[Dict[str,Any]]) -> Tuple[str,str]:
-    """
-    최종 카테고리 구분:
-      - identifiers : 고유식별정보 포함
-      - sensitive   : PIPA 민감(정치/노조/신념/성생활/건강) 또는 ICD10_CODE 포함
-      - public      : 일반 개인정보(이메일/전화/주소/계좌/카드/DOB/이름 등) 포함
-      - none        : 본문/메타 모두 개인정보 신호 없음
-    """
-
+                    ai_hits: List[Dict[str,Any]]) -> Tuple[str,str]:
+    """최종 카테고리 구분 (AI 결과 반영)"""
     meta_vals = (meta or {}).get("values", {})
     body_vals = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
 
     ents_meta = {(k or "").upper() for k in meta_vals.keys()}
     ents_body = {(k or "").upper() for k in body_vals.keys()}
-    ents_pres = {(h.get("entity") or "").upper() for h in presidio_hits if h.get("entity")}
-    ents = ents_meta | ents_body | ents_pres
+    ents_ai = {_normalize_ai_label((h.get("entity") or "").upper()) for h in ai_hits if h.get("entity")}
+    ents = ents_meta | ents_body | ents_ai
 
     # 고유식별 우선
     if ents & ID_ENTS:
         return "identifiers", "고유식별정보 포함"
 
-    # 민감(PIPA) 또는 ICD-10(건강정보)
+    # 민감(PIPA) 또는 ICD-10
     if (ents & PIPA_ENTS) or ("ICD10_CODE" in ents):
         return "sensitive", "민감정보 포함"
 
-    # 일반 개인정보(이메일/전화/주소/카드/계좌/생년월일/이름 등)
+    # 일반 개인정보
     if ents & GENERAL_PII:
         return "public", "개인정보 포함"
 
-    # 엔티티가 전혀 없으면 none
     return "none", "개인정보 없음"
 
 # =========================================================
@@ -801,12 +802,11 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
 
     lines.append(f" ├─ 형식: {ctype}")
 
-    # 추가된 부분: values 사전도 함께 확인
     values_dict = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
 
-    rb   = findings.get("__retention_base__")       or values_dict.get("__retention_base__")
-    due  = findings.get("__retention_due_at__")     or values_dict.get("__retention_due_at__")
-    viol = findings.get("__retention_violation__")  or values_dict.get("__retention_violation__")
+    rb = findings.get("__retention_base__") or values_dict.get("__retention_base__")
+    due = findings.get("__retention_due_at__") or values_dict.get("__retention_due_at__")
+    viol = findings.get("__retention_violation__") or values_dict.get("__retention_violation__")
 
     if rb or due:
         lines.append(" ├─ 보존 기준:")
@@ -839,7 +839,7 @@ def build_console_like(key: str, ctype: str, findings: Dict[str,Any],
     return "\n".join(lines)
 
 # =========================================================
-# 11) Blob 분석
+# 11) Blob 분석 (AI 통합)
 # =========================================================
 def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
     key = blob.get("key","")
@@ -851,14 +851,15 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
     findings: Dict[str,Any] = {}
     ctype = "unknown"
 
-    presidio_hits: List[Dict[str,Any]] = []
-    rows_detail: List[Dict[str, Any]] = [] 
+    ai_hits: List[Dict[str,Any]] = []
+    rows_detail: List[Dict[str, Any]] = []
+    
     if text:
         if looks_like_csv(text):
             ctype = "text/csv"
             res = detect_in_csv_text(text)
             findings.update(res)
-            # CSV일 때만 행단위 created_at 반영
+            
             row_list = res.get("csv_row_created")
             if row_list:
                 meta.setdefault("csv_meta", {})
@@ -866,24 +867,29 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
             
             rows_detail = res.get("rows_detail") or []
 
-            presidio_hits = run_presidio([text])
-            _merge_presidio_hits_into_findings(findings, presidio_hits, is_csv=True)
+            # AI 탐지 실행
+            print(f"[AI] CSV 분석 중: {key}")
+            ai_hits = run_ai_pii([text])
+            _merge_ai_hits_into_findings(findings, ai_hits, is_csv=True)
+            
         else:
             ctype = "text/plain"
             res = detect_in_plain_text(text)
             findings.update(res)
-            # 평문 분기에서는 created_at 행리스트/최솟값 등의 처리를 하지 않음
-            presidio_hits = run_presidio([text])
-            _merge_presidio_hits_into_findings(findings, presidio_hits, is_csv=False)
+            
+            # AI 탐지 실행
+            print(f"[AI] 평문 분석 중: {key}")
+            ai_hits = run_ai_pii([text])
+            _merge_ai_hits_into_findings(findings, ai_hits, is_csv=False)
+            
     elif metrics is not None:
         ctype = "application/json"
         findings["json_values"] = {}
     else:
         ctype = "unknown"
 
-    category, reason = decide_category(meta, findings, presidio_hits)
+    category, reason = decide_category(meta, findings, ai_hits)
     
-    # 엔티티별 저장 경로 계산
     body_vals_for_paths = findings.get("values_text") or findings.get("values") or findings.get("json_values") or {}
     safe_key = _safe_key_filename(key)
     saved_paths = {}
@@ -904,8 +910,8 @@ def analyze_one_blob(blob: Dict[str,Any]) -> Dict[str,Any]:
             "risk_hints": meta.get("risk_hints", {})
         },
         "body": {"detected": (findings.get("values_text") or findings.get("values") or {})},
-        "body_rows": rows_detail, 
-        "presidio": presidio_hits,
+        "body_rows": rows_detail,
+        "ai_hits": [{"entity": h.get("entity"), "text": h.get("text"), "score": h.get("score")} for h in ai_hits],
         "classification": {
             "category": category,
             "reason": reason,
@@ -919,25 +925,21 @@ def enrich_with_policy(rec: dict) -> dict:
     _init_policy_index()
     global slug_index
 
-    # 기본값 초기화
     rec["policy_map"] = None
     rec["retention_due_at"] = None
     rec["retention_violation"] = None
     rec["retention_base"] = None
 
-    # 정책 인덱스 없으면 매핑 종료
     if not slug_index:
         return rec
 
-    # --- 여기부터: key(stem) 기준 매핑만 허용 ---
     key_stem = _key_stem_lower(rec.get("file") or rec.get("key") or "")
     if not key_stem:
         return rec
 
-    # slug_index는 소문자 키라고 가정하고, 동일하게 소문자 stem으로 매핑
     p = map_bucket_to_policy(key_stem, slug_index)
     if not p:
-        return rec  # 매핑 실패 시: 이후 DEFAULT_ROW_RETENTION_DAYS로 행 단위 계산 가능
+        return rec
 
     rec["policy_map"] = {
         "policy_id": p.policy_id,
@@ -1003,22 +1005,15 @@ def enrich_with_policy(rec: dict) -> dict:
     return rec
 
 def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
-    # ─────────────────────────────────────────────────────────
-    # 정책 CSV가 없을 때 기본 행(ROW) 보존기간 일수 (없으면 0=미계산)
     DEFAULT_ROW_RETENTION_DAYS = int(os.getenv("DEFAULT_ROW_RETENTION_DAYS", "0"))
-    # 모든 파일에서 초과(만료)된 행만 모아 alerts.json으로 저장
     alerts_bucket: List[Dict[str, Any]] = []
-    # ─────────────────────────────────────────────────────────
 
     print(f"\n[DEBUG] DEFAULT_ROW_RETENTION_DAYS = {DEFAULT_ROW_RETENTION_DAYS}")
 
     enriched_reports = []
     for r in reports:
-        # 1) 정책 enrich (retention_days 등 계산에 필요)
         r = enrich_with_policy(r)
 
-        # 2) ── 행(ROW) 단위 보존기간 계산 ─────────────────────────
-        # policy_days: 정책 CSV(fixed) > 기본값 환경변수(DEFAULT_ROW_RETENTION_DAYS)
         policy_days = None
         pm = r.get("policy_map") or {}
         if pm.get("retention_type") == "fixed" and pm.get("retention_days"):
@@ -1032,7 +1027,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         print(f"\n[DEBUG] 파일: {r.get('file')}")
         print(f"[DEBUG] policy_days: {policy_days}")
 
-        # rows_detail 키(또는 body_rows 키)로 행별 정보 가져오기 (둘 다 지원)
         rows_detail = r.get("body_rows") or r.get("rows_detail") or []
         print(f"[DEBUG] rows_detail 개수: {len(rows_detail)}")
         
@@ -1058,7 +1052,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 
                 print(f"[DEBUG]     -> due={due}, now={now_utc}, violation={violation}")
 
-                # 행 객체에 보존 계산 결과 주입
                 rd.setdefault("retention", {})
                 rd["retention"].update({
                     "policy_days": policy_days,
@@ -1066,7 +1059,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                     "violation": violation,
                 })
 
-                # 초과(만료)행이면 알림 큐에 적재
                 if violation:
                     print(f"[DEBUG]     -> *** ALERT 적재 ***")
                     row_alerts.append({
@@ -1074,9 +1066,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                         "row": rd.get("row"),
                         "created_at": created_iso,
                         "due_at": due.isoformat(),
-                        # 알림에 표시할 최소 식별 정보(원하면 더 추가)
                         "row_key_fields": (rd.get("row_key_fields") or {
-                            # 호환: CSV에 이런 헤더가 있으면 채워졌을 가능성 있음
                             "name_ko": (rd.get("entities") or {}).get("KR_NAME", [None])[0],
                             "email": (rd.get("entities") or {}).get("EMAIL_ADDRESS", [None])[0],
                             "phone": (rd.get("entities") or {}).get("PHONE_NUMBER", [None])[0],
@@ -1084,12 +1074,10 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                         "entities": rd.get("entities"),
                     })
 
-        # 파일 리포트에 alerts(파일별) 부착 + 전체 alerts 버킷에 합산
         if row_alerts:
             r["alerts"] = row_alerts
             alerts_bucket.extend(row_alerts)
 
-        # 3) body.detected에 보존 디버그 키 주입(기존 유지)
         det = r.setdefault("body", {}).setdefault("detected", {}) or {}
         rb = r.get("retention_base")
         if rb is not None:
@@ -1099,19 +1087,17 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         if r.get("retention_violation") is not None:
             det["__retention_violation__"] = r["retention_violation"]
 
-        # 4) console_like 재생성(기존 유지)
         key = r.get("file","")
         ctype = r.get("type","unknown")
         findings = {"values_text": det}
         category = (r.get("classification") or {}).get("category","none")
-        reason   = (r.get("classification") or {}).get("reason","")
+        reason = (r.get("classification") or {}).get("reason","")
         r["console_like"] = build_console_like(key, ctype, findings, category, reason)
 
         enriched_reports.append(r)
 
     reports = enriched_reports
 
-    # ===== 콘솔 출력 + results.json 저장 (기존 유지) =====
     console_blocks: List[str] = []
     for r in reports:
         det = r.get("body", {}).get("detected", {}) or {}
@@ -1126,13 +1112,11 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     out_json_path.write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n결과 JSON 저장: {out_json_path.resolve()}")
 
-    # 추가 저장: 모든 파일의 만료행 합본 alerts.json
     base_dir = out_json_path.parent
     alerts_path = base_dir / "alerts.json"
     alerts_path.write_text(json.dumps(alerts_bucket, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Alerts 저장: {alerts_path.resolve()}  (rows={len(alerts_bucket)})")
 
-    # ===== Front 전용 결과(results_front.json) 생성 (기존 + 만료행 카운트 추가) =====
     front_reports = []
     for r in reports:
         file = r.get("file")
@@ -1140,7 +1124,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         category = r.get("classification", {}).get("category")
         reason = r.get("classification", {}).get("reason")
         saved_paths = r.get("classification", {}).get("saved_paths", {})
-        expired_rows = len(r.get("alerts", []))  
+        expired_rows = len(r.get("alerts", []))
 
         front_reports.append({
             "file": file,
@@ -1153,7 +1137,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 "rows_scanned": r.get("body", {}).get("rows_scanned"),
                 "total_entities": len(findings or {}),
                 "unique_entity_types": list((findings or {}).keys()),
-                "expired_rows": expired_rows,  
+                "expired_rows": expired_rows,
             },
             "entities": {
                 ent: {
@@ -1170,7 +1154,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     front_path.write_text(json.dumps(front_reports, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Front 결과 저장: {front_path.resolve()}")
 
-    # 콘솔 사본 (기존 유지)
     console_path = base_dir / "results.console.txt"
     if console_blocks:
         console_path.write_text("\n".join(console_blocks) + "\n", encoding="utf-8")
@@ -1178,7 +1161,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         console_path.write_text("# 본문 탐지 결과가 있는 항목이 없어 콘솔 출력이 없습니다.\n", encoding="utf-8")
     print(f"콘솔 출력 사본 저장: {console_path.resolve()}")
 
-    # 엔티티별 텍스트 저장 (기존 유지)
     for r in reports:
         body_detected: Dict[str, List[str]] = r.get("body", {}).get("detected", {}) or {}
         if not body_detected:
@@ -1198,7 +1180,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
             ] + [str(v) for v in vals]
             per_ent_path.write_text("\n".join(per_ent_content) + "\n", encoding="utf-8")
 
-    # 리소스(source) 롤업 (기존 유지)
     by_source: Dict[str, Dict[str, Any]] = {}
     for r in reports:
         src_label = _derive_source_label(r.get("file","")) or "unknown"
@@ -1239,7 +1220,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
     by_source_path.write_text(json.dumps(rollup, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"리소스 요약 저장: {by_source_path.resolve()}")
 
-    # (선택) 리소스별 통합 텍스트 아카이브 (기존 유지)
     for src, rec in by_source.items():
         safe_src = re.sub(r"[^\w\-\.]+", "_", src or "unknown")
         for ent, e in rec["entities"].items():
@@ -1253,7 +1233,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                 pass
 
 # =========================================================
-# 13) 페이로드 전개
+# 12) 페이로드 전개
 # =========================================================
 def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict[str,Any]]]:
     try:
@@ -1265,7 +1245,6 @@ def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict
         if not isinstance(parsed, list):
             return None
 
-        # 부모 key에서 .json 접미어 제거 후 prefix로 사용
         parent_key = (blob.get("key") or "")
         parent_prefix = re.sub(r"\.json$", "", parent_key)
 
@@ -1274,8 +1253,7 @@ def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict
             if not isinstance(item, dict):
                 return None
             if "key" in item and "content" in item:
-                # 내부 항목의 key 앞에 부모 경로를 붙여, 파일 라인에 풀경로가 찍히게 함
-                child = dict(item)  # shallow copy
+                child = dict(item)
                 child_key = str(child.get("key", "")).lstrip("/")
                 child["key"] = f"{parent_prefix}/{child_key}"
                 children.append(child)
@@ -1286,31 +1264,27 @@ def _maybe_flatten_embedded_json_text(blob: Dict[str,Any]) -> Optional[List[Dict
         return None
 
 def preprocess_payload(payload: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
-    """
-    입력 리스트를 받아, '본문이 내부 JSON 리스트'인 항목은 내부 key별로 전개하여 반환.
-    그렇지 않은 항목은 그대로 유지.
-    """
+    """입력 리스트를 받아, '본문이 내부 JSON 리스트'인 항목은 내부 key별로 전개"""
     result: List[Dict[str,Any]] = []
     for blob in payload:
         children = _maybe_flatten_embedded_json_text(blob)
         if children:
-            # 외부 컨테이너(blob)는 건너뛰고, 내부 항목들을 채택
             result.extend(children)
         else:
             result.append(blob)
     return result
 
 # =========================================================
-# 14) CLI
+# 13) CLI
 # =========================================================
 if __name__ == "__main__":
     import argparse
     import json
     from pathlib import Path
-    from datetime import datetime, timedelta  # ← enrich_with_policy에서 사용
+    from datetime import datetime, timedelta
 
     parser = argparse.ArgumentParser(
-        description="PII/Sensitive scanner (console-like JSON & classification)"
+        description="PII/Sensitive scanner (AI 통합 버전)"
     )
     parser.add_argument(
         "--input", "-i",
@@ -1336,10 +1310,8 @@ if __name__ == "__main__":
     if not isinstance(payload, list):
         raise SystemExit("[!] 입력 JSON은 리스트여야 합니다. (예: [{...}, {...}])")
 
-    # 내부 JSON 리스트 전개
     worklist = preprocess_payload(payload)
 
-    # 분석 실행
     reports = [analyze_one_blob(b) for b in worklist]
 
     from pathlib import Path

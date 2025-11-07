@@ -458,7 +458,7 @@ def collect_and_scan(
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser(description="Collect from AWS HTTP Collector and scan with main.py pipeline")
-    p.add_argument("--api", required=True, help="Collector base url (e.g., http://http://211.44.183.248:8000 or .../explorer)")
+    p.add_argument("--api", required=True, help="Collector base url (e.g., http://211.44.183.248:8000 or .../explorer)")
     p.add_argument("--services", default="", help="Comma-separated services (e.g., s3,dynamodb). Empty=all")
     p.add_argument("--out", default="results_all.json", help="Output result json")
     p.add_argument("--dump-dir", default="", help="(optional) Directory to dump raw collected payloads")
