@@ -22,7 +22,7 @@ try:
     from engine_pii import analyze_text as _presidio_analyze_text
     from engine_pii import list_loaded_recognizers as _presidio_list_loaded
     ENGINE_PII_AVAILABLE = True
-    print("[info] AI PII Engine: ON (http://43.202.228.52:8900/infer)")
+    print("[info] AI PII Engine: ON (http://211.44.183.248:8900/infer)")
 except Exception as e:
     print(f"[warn] AI Engine import 실패: {e}")
 
@@ -669,24 +669,99 @@ def detect_in_plain_text(text: str) -> Dict[str, Any]:
     return {"values": scan_text_values_all(text)}
 
 # =========================================================
-# 8) AI 실행 + 병합 (NEW)
+# 8) AI 실행 + 병합 (NEW - 청크 분할 추가)
 # =========================================================
+def _split_text_into_chunks(text: str, max_chars: int = 15000) -> List[str]:
+    """
+    긴 텍스트를 max_chars 단위로 분할 (문장 경계 고려)
+    
+    Args:
+        text: 원본 텍스트
+        max_chars: 청크당 최대 문자 수 (기본 5000자)
+    
+    Returns:
+        분할된 텍스트 청크 리스트
+    """
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    
+    # 줄 단위로 분할 (CSV의 경우 행 단위 유지)
+    lines = text.split('\n')
+    
+    for line in lines:
+        # 현재 청크 + 이번 라인이 제한을 초과하면
+        if len(current_chunk) + len(line) + 1 > max_chars:
+            if current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = line
+            else:
+                # 한 줄이 max_chars보다 긴 경우 강제 분할
+                for i in range(0, len(line), max_chars):
+                    chunks.append(line[i:i + max_chars])
+        else:
+            if current_chunk:
+                current_chunk += '\n' + line
+            else:
+                current_chunk = line
+    
+    # 마지막 청크 추가
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    return chunks
+
+
 def run_ai_pii(texts: List[str]) -> List[Dict[str,Any]]:
-    """AI PII 탐지 실행"""
+    """
+    AI PII 탐지 실행 (청크 분할 지원)
+    
+    Args:
+        texts: 분석할 텍스트 리스트
+    
+    Returns:
+        탐지된 엔티티 리스트
+    """
     if not ENGINE_PII_AVAILABLE: 
         print("[warn] AI Engine 비활성: 룰 기반으로 폴백")
         return []
     
     hits: List[Dict[str,Any]] = []
+    
     for t in texts:
         if not t or len(t.strip()) == 0:
             continue
-        try:
-            result = _presidio_analyze_text(t)
-            merged = result.get("merged", [])
-            hits.extend(merged)
-        except Exception as e:
-            print(f"[warn] AI 분석 오류: {e}")
+        
+        # 텍스트가 너무 길면 청크로 분할
+        chunks = _split_text_into_chunks(t, max_chars=5000)
+        
+        if len(chunks) > 1:
+            print(f"[AI 청크 분할] 텍스트 길이 {len(t):,}자 → {len(chunks)}개 청크로 분할")
+        
+        # 각 청크별로 AI 분석
+        for idx, chunk in enumerate(chunks, 1):
+            if len(chunks) > 1:
+                print(f"[AI 분석 중] 청크 {idx}/{len(chunks)} (길이: {len(chunk):,}자)")
+            
+            try:
+                result = _presidio_analyze_text(chunk)
+                chunk_hits = result.get("merged", [])
+                
+                # 청크의 오프셋을 전체 텍스트 기준으로 조정
+                if idx > 1:
+                    # 이전 청크들의 총 길이 계산
+                    offset = sum(len(chunks[i]) + 1 for i in range(idx - 1))  # +1은 \n
+                    for h in chunk_hits:
+                        h['start'] += offset
+                        h['end'] += offset
+                
+                hits.extend(chunk_hits)
+                
+            except Exception as e:
+                print(f"[warn] AI 분석 오류 (청크 {idx}/{len(chunks)}): {e}")
+                continue
     
     return hits
 
@@ -1125,7 +1200,6 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         reason = r.get("classification", {}).get("reason")
         saved_paths = r.get("classification", {}).get("saved_paths", {})
         expired_rows = len(r.get("alerts", []))
-        ai_hits = r.get("ai_hits", [])  # ai_hits 추출
 
         front_reports.append({
             "file": file,
@@ -1148,8 +1222,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                     "saved_path": saved_paths.get(ent)
                 }
                 for ent, vals in findings.items()
-            },
-            "ai_hits": ai_hits  # ai_hits 추가
+            }
         })
 
     front_path = base_dir / "results_front.json"
