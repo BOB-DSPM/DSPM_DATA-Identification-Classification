@@ -677,7 +677,7 @@ def _split_text_into_chunks(text: str, max_chars: int = 15000) -> List[str]:
     
     Args:
         text: 원본 텍스트
-        max_chars: 청크당 최대 문자 수 (기본 5000자)
+        max_chars: 청크당 최대 문자 수 (기본 15000자)
     
     Returns:
         분할된 텍스트 청크 리스트
@@ -735,7 +735,7 @@ def run_ai_pii(texts: List[str]) -> List[Dict[str,Any]]:
             continue
         
         # 텍스트가 너무 길면 청크로 분할
-        chunks = _split_text_into_chunks(t, max_chars=5000)
+        chunks = _split_text_into_chunks(t, max_chars=15000)
         
         if len(chunks) > 1:
             print(f"[AI 청크 분할] 텍스트 길이 {len(t):,}자 → {len(chunks)}개 청크로 분할")
