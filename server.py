@@ -122,7 +122,7 @@ class FrontItem(BaseModel):
     risk_hints: Dict[str, Any] = Field(default_factory=dict)
     stats: FrontStatsModel = Field(default_factory=FrontStatsModel)
     entities: Dict[str, FrontEntityItem] = Field(default_factory=dict)
-
+    ai_hits: List[Dict[str, Any]] = Field(default_factory=list)  # 이 줄 추가
 class ListResponse(BaseModel):
     total: int
     page: int
@@ -266,6 +266,7 @@ class FrontStore:
         hints = raw.get("risk_hints") or {}
         st = raw.get("stats") or {}
         ents = raw.get("entities") or {}
+        ai_hits = raw.get("ai_hits", [])
         rid = _sha12(f"{file}|{src}|{typ}|{cat}")
 
         n_ents: Dict[str, FrontEntityItem] = {}
@@ -287,6 +288,7 @@ class FrontStore:
                 unique_entity_types=list(st.get("unique_entity_types") or []),
             ),
             entities=n_ents,
+            ai_hits=ai_hits, 
         )
 
     def _load(self):

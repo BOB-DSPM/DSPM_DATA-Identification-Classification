@@ -22,7 +22,7 @@ try:
     from engine_pii import analyze_text as _presidio_analyze_text
     from engine_pii import list_loaded_recognizers as _presidio_list_loaded
     ENGINE_PII_AVAILABLE = True
-    print("[info] AI PII Engine: ON (http://211.44.183.248:8900/infer)")
+    print("[info] AI PII Engine: ON (http://43.202.228.52:8900/infer)")
 except Exception as e:
     print(f"[warn] AI Engine import 실패: {e}")
 
@@ -1125,6 +1125,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         reason = r.get("classification", {}).get("reason")
         saved_paths = r.get("classification", {}).get("saved_paths", {})
         expired_rows = len(r.get("alerts", []))
+        ai_hits = r.get("ai_hits", [])  # ai_hits 추출
 
         front_reports.append({
             "file": file,
@@ -1147,7 +1148,8 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                     "saved_path": saved_paths.get(ent)
                 }
                 for ent, vals in findings.items()
-            }
+            },
+            "ai_hits": ai_hits  # ai_hits 추가
         })
 
     front_path = base_dir / "results_front.json"

@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import List, Dict, Any
 import requests
 
-PII_MODEL_URL = "http://211.44.183.248:8900/infer"
+PII_MODEL_URL = "http://43.202.228.52:8900/infer"
 
 # ============== 로그 유틸 ==============
 def _truncate_text(text: str, max_len: int = 100) -> str:
