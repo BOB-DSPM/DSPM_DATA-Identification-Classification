@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 # 익명화 패턴 정의
 ANONYMIZED_PATTERNS = {
     'zero': [0, '0', '00', '000'],
-    'null': [None, 'null', 'NULL', 'None', ''],
+    'null': [None, 'null', 'NULL', 'Null', 'None', 'none', ''],
     'placeholder': [99, '99', 999, '999', 9999, '9999', -1, '-1'],
-    'deleted': ['deleted', 'DELETED', 'anonymized', 'ANONYMIZED', 'removed', 'REMOVED'],
+    'deleted': ['deleted', 'DELETED', 'Deleted', 'anonymized', 'ANONYMIZED', 'Anonymized', 'removed', 'REMOVED', 'Removed'],
 }
 
 
@@ -57,21 +57,33 @@ class S3IDMatcher:
             
             # 각 패턴 검사
             for pattern_type, pattern_values in ANONYMIZED_PATTERNS.items():
+                matched = False
+                
+                # 직접 비교
                 if field_value in pattern_values:
+                    matched = True
+                # 문자열인 경우 strip 후 비교
+                elif isinstance(field_value, str):
+                    field_value_stripped = field_value.strip()
+                    # 대소문자 무시 비교 (문자열 패턴의 경우)
+                    if field_value_stripped in pattern_values:
+                        matched = True
+                    else:
+                        # 대소문자 무시하고 추가 비교
+                        field_value_lower = field_value_stripped.lower()
+                        for pattern in pattern_values:
+                            if isinstance(pattern, str) and field_value_lower == pattern.lower():
+                                matched = True
+                                break
+                
+                if matched:
                     anonymized_fields.append(field_name)
                     patterns_found[pattern_type].append(field_name)
                     break
-                
-                # 문자열 타입인 경우 추가 검사
-                if isinstance(field_value, str):
-                    field_value_stripped = field_value.strip()
-                    if field_value_stripped in pattern_values:
-                        anonymized_fields.append(field_name)
-                        patterns_found[pattern_type].append(field_name)
-                        break
         
-        # 익명화 판정: 하나 이상의 필드가 익명화 패턴과 일치하면 익명화된 것으로 간주
-        is_anonymized = len(anonymized_fields) > 0
+        # 익명화 판정: 모든 필드(id 제외)가 익명화 패턴과 일치해야 익명화된 것으로 간주
+        total_fields = len([k for k in row_data.keys() if k.lower().strip() != 'id'])
+        is_anonymized = total_fields > 0 and len(anonymized_fields) == total_fields
         
         return {
             'is_anonymized': is_anonymized,
