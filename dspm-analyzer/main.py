@@ -671,7 +671,7 @@ def detect_in_plain_text(text: str) -> Dict[str, Any]:
 # =========================================================
 # 8) AI 실행 + 병합 (NEW - 청크 분할 추가)
 # =========================================================
-def _split_text_into_chunks(text: str, max_chars: int = 1000000) -> List[str]:
+def _split_text_into_chunks(text: str, max_chars: int = 5000000) -> List[str]:
     """
     긴 텍스트를 max_chars 단위로 분할 (문장 경계 고려)
     
@@ -735,7 +735,7 @@ def run_ai_pii(texts: List[str]) -> List[Dict[str,Any]]:
             continue
         
         # 텍스트가 너무 길면 청크로 분할
-        chunks = _split_text_into_chunks(t, max_chars=1000000)
+        chunks = _split_text_into_chunks(t, max_chars=5000000)
         
         if len(chunks) > 1:
             print(f"[AI 청크 분할] 텍스트 길이 {len(t):,}자 → {len(chunks)}개 청크로 분할")
