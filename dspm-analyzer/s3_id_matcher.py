@@ -287,8 +287,8 @@ class S3IDMatcher:
                 print(f"    {traceback.format_exc()}")
                 return {'found_ids': set(), 'matches': [], 'anonymized_matches': []}
         
-        # JSON 파일 처리
-        elif file_key.lower().endswith('.json'):
+        # JSON/JSONL 파일 처리
+        elif file_key.lower().endswith('.json') or file_key.lower().endswith('.jsonl'):
             try:
                 import json as json_lib
                 
@@ -542,7 +542,7 @@ class S3IDMatcher:
             if not file_key:
                 continue
             
-            if file_size > 10 * 1024 * 1024:
+            if file_size > 100 * 1024 * 1024:
                 print(f"  [SKIP] {file_key} (파일 크기: {file_size/1024/1024:.2f}MB)")
                 continue
             
