@@ -677,7 +677,7 @@ def _split_text_into_chunks(text: str, max_chars: int = 5000000) -> List[str]:
     
     Args:
         text: 원본 텍스트
-        max_chars: 청크당 최대 문자 수 (기본 20000자)
+        max_chars: 청크당 최대 문자 수 (기본 5000000자)
     
     Returns:
         분할된 텍스트 청크 리스트
@@ -1200,6 +1200,7 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
         reason = r.get("classification", {}).get("reason")
         saved_paths = r.get("classification", {}).get("saved_paths", {})
         expired_rows = len(r.get("alerts", []))
+        ai_hits = r.get("ai_hits", [])  # 👈 ai_hits 추출
 
         front_reports.append({
             "file": file,
@@ -1222,7 +1223,8 @@ def organize_and_save(reports: List[Dict[str,Any]], out_json_path: Path):
                     "saved_path": saved_paths.get(ent)
                 }
                 for ent, vals in findings.items()
-            }
+            },
+            "ai_hits": ai_hits  # 👈 ai_hits 추가
         })
 
     front_path = base_dir / "results_front.json"
