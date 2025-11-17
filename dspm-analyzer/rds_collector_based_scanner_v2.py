@@ -13,6 +13,11 @@ from typing import List, Dict, Any, Optional, Set
 from datetime import datetime, timezone
 from pathlib import Path
 
+SAGE_HOST = os.getenv("SAGE_HOST", "43.202.228.52")
+
+DEFAULT_ANALYZER_HOST = f"http://{SAGE_HOST}:9000"
+DEFAULT_COLLECTOR_HOST = f"http://{SAGE_HOST}:8000"
+
 # 익명화 패턴 정의
 ANONYMIZED_PATTERNS = {
     'zero': [0, '0', '00', '000'],
@@ -600,9 +605,13 @@ def scan_rds_via_collector_v2(
 # CLI 테스트
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Collector 기반 RDS 익명화 스캐너 v2")
-    parser.add_argument("--collector", default="http://43.202.228.52:8000", help="Collector API 주소")
+    parser.add_argument(
+        "--collector",
+        default=DEFAULT_COLLECTOR_HOST,
+        help="Collector API 주소",
+    )
     parser.add_argument("--db-ids", help="스캔할 RDS ID (쉼표 구분, 없으면 전체)")
     parser.add_argument("--user", default="madeit", help="기본 사용자명")
     parser.add_argument("--password", default="madeit1022!", help="기본 비밀번호")

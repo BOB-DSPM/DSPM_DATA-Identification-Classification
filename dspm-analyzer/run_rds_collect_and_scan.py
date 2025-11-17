@@ -13,9 +13,11 @@ import requests
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-# 기본 설정
-DEFAULT_ANALYZER_HOST = "http://127.0.0.1:9000"
-DEFAULT_COLLECTOR_HOST = "http://43.202.228.52:8000"
+SAGE_HOST = os.getenv("SAGE_HOST", "43.202.228.52")
+
+DEFAULT_ANALYZER_HOST = f"http://{SAGE_HOST}:9000"
+DEFAULT_COLLECTOR_HOST = f"http://{SAGE_HOST}:8000"
+
 
 DEFAULT_RDS_CONFIG = {
     'host': os.getenv('RDS_HOST', 'localhost'),
