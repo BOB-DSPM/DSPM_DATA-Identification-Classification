@@ -1,39 +1,40 @@
-# Dockerfile (dspm-analyzer / front-only API)
+# Dockerfile (AEGIS Analyzer API)
 FROM python:3.12-slim
 
+ARG APP_PORT=8400
 ENV DEBIAN_FRONTEND=noninteractive \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8400
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=${APP_PORT}
 
-# 기본 유틸 (HEALTHCHECK용 curl 포함)
+# 필수 시스템 패키지 설치 (curl은 HEALTHCHECK 용도)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates tzdata gcc g++ \
+    curl ca-certificates tzdata build-essential \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 의존성 설치: analyzer 전용 req만 사용
-COPY dspm-analyzer/requirements.txt /tmp/reqs/analyzer.txt
+# 의존성 설치 (analyzer requirements + API 프레임워크)
+COPY dspm-analyzer/requirements.txt /tmp/requirements.txt
 RUN pip install --upgrade pip \
- && pip install -r /tmp/reqs/analyzer.txt \
+ && pip install --no-cache-dir -r /tmp/requirements.txt \
     fastapi uvicorn[standard]
 
-# 앱 소스 복사 (var/results는 .dockerignore로 제외)
-COPY . /app
+# 앱 복사 (.dockerignore 로 var/results 등은 제외)
+COPY . .
 
-# 결과 디렉토리 & 비루트 유저
+# 실행 사용자/작업 디렉토리 준비
 RUN mkdir -p /app/var/results \
- && useradd -ms /bin/bash appuser \
+ && groupadd --system appuser \
+ && useradd --system --gid appuser --create-home appuser \
  && chown -R appuser:appuser /app
 USER appuser
 
 VOLUME ["/app/var/results"]
+EXPOSE ${APP_PORT}
 
-# 포트/헬스체크/실행 커맨드
-EXPOSE 8400
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
   CMD curl -sf http://127.0.0.1:${PORT}/health || exit 1
 
-CMD ["sh", "-c", "python -m uvicorn server:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "${PORT}"]
