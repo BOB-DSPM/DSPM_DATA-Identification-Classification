@@ -91,6 +91,7 @@ class FrontEntityItem(BaseModel):
     bucket: str
     values: List[str] = Field(default_factory=list)
     saved_path: Optional[str] = None
+
 class RDSAnonymizationScanRequest(BaseModel):
     host: str = Field(..., description="RDS 호스트 주소")
     port: int = Field(3306, description="RDS 포트")
@@ -122,7 +123,8 @@ class FrontItem(BaseModel):
     risk_hints: Dict[str, Any] = Field(default_factory=dict)
     stats: FrontStatsModel = Field(default_factory=FrontStatsModel)
     entities: Dict[str, FrontEntityItem] = Field(default_factory=dict)
-    ai_hits: List[Dict[str, Any]] = Field(default_factory=list)  # 이 줄 추가
+    ai_hits: List[Dict[str, Any]] = Field(default_factory=list)
+
 class ListResponse(BaseModel):
     total: int
     page: int
@@ -412,33 +414,11 @@ def front_stats(include_top: Optional[str] = None, include_type: Optional[str] =
 def category_counts():
     return front_store.category_counts()
 
-# (호환용) 과거 이름 유지
-@app.get("/api/result/categories", response_model=CategoryCountsResponse)
-def categories_alias():
-    return front_store.category_counts()
-
 @app.get("/api/result/front-list", response_model=ListResponse)
 def front_list(
     page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=200),
     q: Optional[str] = None,
     category: Optional[str] = None,
-    type: Optional[str] = Query(None, alias="type"),
-    entity: Optional[str] = None,
-    has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
-    source: Optional[str] = None,
-    source_prefix: Optional[str] = None,
-    file_prefix: Optional[str] = None,
-):
-    rows = front_store.query(q=q, category=category, type_=type, entity=entity, has_entities=has_entities,
-                             source=source, source_prefix=source_prefix, file_prefix=file_prefix)
-    total=len(rows); start=(page-1)*size; end=start+size
-    return ListResponse(total=total, page=page, size=size, items=rows[start:end])
-
-@app.get("/api/result/front-category/{category}", response_model=ListResponse)
-def front_category(
-    category: Literal["public","sensitive","identifiers","none"],
-    page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=200),
-    q: Optional[str] = None,
     type: Optional[str] = Query(None, alias="type"),
     entity: Optional[str] = None,
     has_entities: Optional[Literal["yes","no","any"]] = Query("any"),
@@ -488,7 +468,7 @@ def source_summary():
     return {"items": front_store.summarize_by_source_runtime()}
 
 # ─────────────────────────────────────────────────────────────
-# Manifest / Tree / Archive endpoints 
+# Manifest / Tree endpoints (Archive 제거)
 # ─────────────────────────────────────────────────────────────
 @app.get("/api/result/manifest")
 def result_manifest():
@@ -500,19 +480,6 @@ def result_manifest():
 @app.get("/api/result/tree")
 def result_tree():
     return _tree_node(RESULTS_DIR)
-
-@app.get("/api/result/archive")
-def result_archive(fmt: Literal["zip","tar.gz"]="zip"):
-    base = RESULTS_DIR
-    if fmt == "zip":
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip"); tmp.close()
-        shutil.make_archive(tmp.name[:-4], "zip", root_dir=base.parent, base_dir=base.name)
-        return FileResponse(tmp.name, media_type="application/zip", filename="results.zip")
-    else:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz"); tmp.close()
-        with tarfile.open(tmp.name, "w:gz") as tar:
-            tar.add(str(base), arcname=base.name)
-        return FileResponse(tmp.name, media_type="application/gzip", filename="results.tar.gz")
 
 # ─────────────────────────────────────────────────────────────
 # Collector trigger — 결과 폴더 고정(var/results)
@@ -599,21 +566,6 @@ def reload_front():
     front_store.ensure()
     return {"ok": True, "count": len(front_store.items), "path": str(RESULTS_FRONT_JSON)}
 
-@app.get("/api/result/source/entities")
-def source_entities_qs(source: str):
-    data = _safe_read_json(RESULTS_SOURCE_SUM)
-    if isinstance(data, list):
-        for row in data:
-            if row.get("source") == source:
-                return row
-    # 파일이 없어도 런타임으로 제공
-    for row in front_store.summarize_by_source_runtime():
-        if row.get("source") == source:
-            return row
-    return {"error": "source not found"}
-
-
-
 @app.post("/api/v2/scan/rds-auto", response_model=RDSCollectorScanResponse)
 def scan_rds_auto_endpoint(req: RDSCollectorScanRequestV2 = Body(...)):
     """
@@ -693,59 +645,6 @@ def scan_rds_auto_endpoint(req: RDSCollectorScanRequestV2 = Body(...)):
             ok=False,
             error=error_msg
         )
-
-
-@app.get("/api/v2/scan/rds-auto/report")
-def get_rds_auto_report():
-    """[v2] 자동 RDS 익명화 검증 리포트 조회"""
-    report_path = RESULTS_DIR / "rds_auto_scan_report.json"
-    
-    if not report_path.exists():
-        return {"error": "리포트가 존재하지 않습니다. 먼저 스캔을 실행하세요."}
-    
-    try:
-        data = json.loads(report_path.read_text(encoding='utf-8'))
-        return data
-    except Exception as e:
-        return {"error": f"리포트 읽기 실패: {e}"}
-
-
-@app.get("/api/v2/scan/rds-auto/violations")
-def get_rds_auto_violations():
-    """[v2] 자동 RDS 익명화 위반 사항만 조회"""
-    report_path = RESULTS_DIR / "rds_auto_scan_report.json"
-    
-    if not report_path.exists():
-        return {"error": "리포트가 존재하지 않습니다."}
-    
-    try:
-        data = json.loads(report_path.read_text(encoding='utf-8'))
-        
-        # 모든 인스턴스의 위반 사항 수집
-        all_violations = []
-        
-        for instance_result in data.get('results', []):
-            if 'verification' not in instance_result:
-                continue
-            
-            verification = instance_result['verification']
-            if verification.get('status') == 'violation':
-                found_records = verification.get('found', [])
-                
-                for record in found_records:
-                    record['db_identifier'] = instance_result.get('db_identifier')
-                    all_violations.append(record)
-        
-        return {
-            'status': 'violation' if all_violations else 'ok',
-            'total_violations': len(all_violations),
-            'violations': all_violations,
-            'summary': data.get('summary', {})
-        }
-    
-    except Exception as e:
-        return {"error": f"위반 사항 조회 실패: {e}"}
-
 
 class CrossCheckRequest(BaseModel):
     collector_api: str = Field(..., description="Collector API 주소")
@@ -869,7 +768,6 @@ def cross_check_rds_s3(req: CrossCheckRequest = Body(...)):
             "ok": False,
             "error": error_msg
         }
-
 
 @app.get("/api/v2/scan/cross-check/report")
 def get_cross_check_report():
