@@ -5,9 +5,11 @@ engine_pii.py (AI 통합 + 상세 로그, 재시도 없음)
 
 from __future__ import annotations
 from typing import List, Dict, Any
+import os
 import requests
 
-PII_MODEL_URL = "http://43.202.228.52:8900/infer"
+SAGE_HOST = os.getenv("SAGE_HOST", "43.202.228.52")
+PII_MODEL_URL = os.getenv("PII_MODEL_URL", f"http://{SAGE_HOST}:8900/infer")
 
 # ============== 로그 유틸 ==============
 def _truncate_text(text: str, max_len: int = 100) -> str:
